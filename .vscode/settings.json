@@ -1,0 +1,3 @@
+{
+    "rust.features": ["ferrite/VK_KHR_win32_surface", "ferrite/VK_EXT_debug_report"]
+}
