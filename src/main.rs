@@ -295,14 +295,14 @@ impl EventDelegate for App
 
 
         let mut fc = FontContext::new().unwrap();
-        let open_sans_regular = std::fs::File::open("OpenSans-Regular.ttf")
+        let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
             .and_then(|mut fp| { use std::io::prelude::*; let mut b = Vec::new(); fp.read_to_end(&mut b).map(|_| b) })
             .unwrap().into();
-        fc.add_font_from_memory(&0, open_sans_regular, 0).unwrap();
+        fc.add_font_from_memory(&0, fontfile, 0).unwrap();
         // FontInstanceのサイズ指定はデバイス依存px単位
-        let font = FontInstance::new(&0, Au::from_f32_px(10.0 * 96.0 / 72.0));
+        let font = FontInstance::new(&0, Au::from_f32_px(120.0 * 96.0 / 72.0));
         // text -> glyph indices
-        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello, world!".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
+        let glyphs = fc.load_glyph_indices_for_characters(&font, &"にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
