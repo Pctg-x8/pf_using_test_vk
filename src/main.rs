@@ -148,6 +148,14 @@ impl App
 }
 use pathfinder_partitioner::mesh::Mesh;
 use pathfinder_partitioner::BQuadVertexPositions;
+/*
+Buffer:
+[[Interior-Filling Positions(Vertex Buffer)]] - 0..
+[[Interior-Filling Indices(Index Buffer)]]    - interior_indices_offset..
+[[Loop-Blinn Curve Data(Vertex Buffer)]]      - bvlb_data_offset..
+[[Loop-Blinn Curve Positions(Vertex Buffer)]] - bvlb_pos_offset..
+[[Loop-Blinn Curve Indices(Index Buffer)]]    - bvlb_indices_offset..
+*/
 pub struct PathfinderRenderBuffers
 {
     buf: fe::Buffer, mem: fe::DeviceMemory,
@@ -284,6 +292,7 @@ impl EventDelegate for App
             cmdpool, queue, tqueue: device.queue(tq, if united_queue { 1 } else { 0 }),
             device, adapter, instance, gq, _tq: tq, _d: d, device_memindex, upload_memindex
         };
+
 
         let mut fc = FontContext::new().unwrap();
         let open_sans_regular = std::fs::File::open("OpenSans-Regular.ttf")

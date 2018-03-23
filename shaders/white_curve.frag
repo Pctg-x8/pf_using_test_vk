@@ -25,7 +25,6 @@ void main()
     */
 
     float sd = pow(uv_in.x, 2) - uv_in.y;
-    float winding = gl_FrontFacing ? -1.0 : 1.0;
     if(sd * dir < 0) discard;
     target = vec4(1.0, 1.0, 1.0, 1.0);
 }
