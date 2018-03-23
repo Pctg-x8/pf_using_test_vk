@@ -21,6 +21,8 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::borrow::Cow;
 
+const SAMPLE_COUNT: usize = 8;
+
 /*
 #[repr(C)] #[derive(Clone)] pub struct Vertex([f32; 4]);
 #[repr(C)] #[derive(Clone)] pub struct BufferData { cpuvs: [[f32; 2]; 3], fill_data: [Vertex; 4] }
@@ -40,7 +42,7 @@ impl BufferData
     }
 }*/
 
-#[repr(C)] #[derive(Clone, Debug)]
+/*#[repr(C)] #[derive(Clone, Debug)]
 pub struct QBezierSegment([f32; 4], [f32; 4], [f32; 4]);
 impl QBezierSegment
 {
@@ -55,7 +57,7 @@ impl QBezierSegment
         let new_cp = center4(&p0, &p1);
         [QBezierSegment(self.0.clone(), p0, new_cp.clone()), QBezierSegment(new_cp, p1, self.2.clone())]
     }
-}
+}*/
 
 struct ShaderStore
 {
@@ -275,7 +277,8 @@ impl EventDelegate for App
             .and_then(|mut fp| { use std::io::prelude::*; let mut b = Vec::new(); fp.read_to_end(&mut b).map(|_| b) })
             .unwrap().into();
         fc.add_font_from_memory(&0, open_sans_regular, 0).unwrap();
-        let font = FontInstance::new(&0, Au::from_px(24));
+        // FontInstanceのサイズ指定はデバイス依存px単位
+        let font = FontInstance::new(&0, Au::from_f32_px(80.0 * 96.0 / 72.0));
         // text -> glyph indices
         let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello, world!".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
@@ -284,20 +287,21 @@ impl EventDelegate for App
         for g in glyphs
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
-            let dim = fc.glyph_dimensions(&font, &g).unwrap();
-            let rendered = left_offs + dim.origin.x as f32 / 96.0;
+            let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
+            println!("dimension?: {:?}", dim);
+            let rendered: f32 = left_offs;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
             let outline = fc.glyph_outline(&font, &g).unwrap();
             paths.extend(Transform2DPathIter::new(outline.iter(),
                 &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
-            left_offs += dim.advance;
-            max_height = max_height.max(dim.size.height as i32 as f32 / 96.0);
+            left_offs += dim.advance/* * 60.0*/;
+            max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
         }
         println!("left offset: {}", left_offs);
         println!("max height: {}", max_height);
         // text outlines -> pathfinder mesh
         let mut partitioner = Partitioner::new();
-        for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 48.0))
+        for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
         {
             partitioner.builder_mut().path_event(pe);
         }
@@ -452,27 +456,37 @@ impl App
         let isr = fe::ImageSubresourceRange::color(0, 0);
         let bb_views = backbuffers.iter().map(|i| i.create_view(None, None, &fe::ComponentMapping::default(), &isr))
             .collect::<fe::Result<Vec<_>>>()?;
+        
+        let ms_dest = fe::ImageDesc::new(&surface_size, surface_format.format, fe::ImageUsage::COLOR_ATTACHMENT.transient_attachment(),
+            fe::ImageLayout::Undefined).sample_counts(SAMPLE_COUNT as _).create(&f.device)
+                .and_then(|r| ImageMemoryPair::new(r, f.device_memindex)).unwrap();
 
-        let rp = fe::RenderPassBuilder::new()
-            .add_attachment(fe::AttachmentDescription::new(surface_format.format,
-                fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
-                .load_op(fe::LoadOp::Clear).store_op(fe::StoreOp::Store))
-            .add_subpass(fe::SubpassDescription::new().add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, None))
-            .add_dependency(fe::vk::VkSubpassDependency
-            {
-                srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
-                srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
-                srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
-                dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
-            })
-            .create(&f.device).unwrap();
-        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&rp, &[iv], &surface_size, 1))
+        let mut rpb = fe::RenderPassBuilder::new();
+        rpb.add_attachments(vec![
+            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::ColorAttachmentOpt, fe::ImageLayout::ColorAttachmentOpt)
+                .load_op(fe::LoadOp::Clear).samples(SAMPLE_COUNT as _),
+            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
+                .store_op(fe::StoreOp::Store)
+        ]);
+        rpb.add_subpass(fe::SubpassDescription::new()
+            .add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, Some((1, fe::ImageLayout::ColorAttachmentOpt))));
+        rpb.add_dependency(fe::vk::VkSubpassDependency
+        {
+            srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
+            srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
+            srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
+            dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
+        });
+        let rp = rpb.create(&f.device).unwrap();
+        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&rp, &[&ms_dest.view, iv], &surface_size, 1))
             .collect::<fe::Result<Vec<_>>>()?;
 
         let fw = fe::Fence::new(&f.device, false).unwrap();
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
         let membarriers = bb_views.iter().map(|iv| fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&iv, 0, 0),
-            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc)).collect::<Vec<_>>();
+            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc))
+            .chain(vec![fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&ms_dest.view, 0, 0),
+                fe::ImageLayout::Undefined, fe::ImageLayout::ColorAttachmentOpt)]).collect::<Vec<_>>();
         init_commands[0].begin().unwrap()
             .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 true, &[], &[], &membarriers);
@@ -483,7 +497,7 @@ impl App
         
         Ok(Some(WindowRenderTargets
         {
-            swapchain, backbuffers: bb_views, framebuffers, renderpass: rp, size: surface_size
+            swapchain, backbuffers: bb_views, framebuffers, renderpass: rp, size: surface_size, ms_dest
         }))
     }
     fn populate_render_commands(&self) -> fe::Result<RenderCommands>
@@ -534,7 +548,8 @@ impl App
 #[allow(dead_code)]
 struct WindowRenderTargets
 {
-    framebuffers: Vec<fe::Framebuffer>, renderpass: fe::RenderPass, backbuffers: Vec<fe::ImageView>,
+    framebuffers: Vec<fe::Framebuffer>, renderpass: fe::RenderPass,
+    ms_dest: ImageMemoryPair, backbuffers: Vec<fe::ImageView>,
     swapchain: fe::Swapchain, size: fe::Extent2D
 }
 struct RenderTargetDependentResources
@@ -557,10 +572,13 @@ impl RenderTargetDependentResources
         let mut vps = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
             VBIND, VATTRS, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
         vps.fragment_shader(fe::PipelineShader::new(&res.shaders.f_q_curve, "main", None));
+        let mut ms = fe::MultisampleState::new();
+        ms.rasterization_samples(SAMPLE_COUNT).sample_shading(Some(1.0)).sample_mask(&[(1 << SAMPLE_COUNT) - 1]);
         let mut gpb = fe::GraphicsPipelineBuilder::new(&res.pl, (&rtvs.renderpass, 0));
         gpb.vertex_processing(vps)
             .fixed_viewport_scissors(fe::DynamicArrayState::Static(&[vp]), fe::DynamicArrayState::Static(&[scis]))
             .add_attachment_blend(fe::AttachmentColorBlendState::premultiplied());
+        gpb.multisample_state(Some(&ms));
         let gp_fill = gpb.create(device, None)?;
         let mut vps_simple = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_pass_fill, "main", None),
             VBIND_FILL_PF, VATTRS_FILL_PF, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
@@ -574,7 +592,7 @@ impl RenderTargetDependentResources
         Ok(RenderTargetDependentResources { gp_fill, gp_simple_fill, gp_wire })
     }
 }
-/*
+
 #[allow(dead_code)]
 struct ImageMemoryPair { view: fe::ImageView, image: fe::Image, memory: fe::DeviceMemory }
 impl ImageMemoryPair
@@ -588,6 +606,5 @@ impl ImageMemoryPair
         return Ok(ImageMemoryPair { view, image, memory })
     }
 }
-*/
 
 fn main() { std::process::exit(GUIApplication::run(App::new())); }
