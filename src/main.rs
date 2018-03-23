@@ -284,7 +284,7 @@ impl EventDelegate for App
         for g in glyphs
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
-            let dim = fc.glyph_dimensions(&font, &g).unwrap();
+            let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
             let rendered = left_offs + dim.origin.x as f32 / 96.0;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
             let outline = fc.glyph_outline(&font, &g).unwrap();
