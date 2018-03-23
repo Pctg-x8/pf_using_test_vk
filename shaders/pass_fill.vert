@@ -7,5 +7,5 @@ layout(push_constant) uniform ScreenInfo { layout(offset = 0) vec2 size; };
 
 void main()
 {
-    gl_Position = vec4((pos_in.xy / size) * vec2(1.0, -1.0), 0.0, 96.0); /*divide by text-dpi(96)*/
+    gl_Position = vec4((pos_in.xy * 2.0 / size) * vec2(1.0, -1.0), 0.0, 1.0); /*divide by text-dpi(96)*/
 }

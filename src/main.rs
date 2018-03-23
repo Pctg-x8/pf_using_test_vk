@@ -7,6 +7,7 @@ extern crate pathfinder_font_renderer; use pathfinder_font_renderer::*;
 extern crate pathfinder_partitioner;
 use pathfinder_partitioner::partitioner::Partitioner;
 use pathfinder_partitioner::FillRule;
+use pathfinder_partitioner::BVertexLoopBlinnData;
 extern crate pathfinder_path_utils;
 use pathfinder_path_utils::cubic_to_quadratic::CubicToQuadraticTransformer;
 use pathfinder_path_utils::transform::Transform2DPathIter;
@@ -20,6 +21,8 @@ use fe::traits::*;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::borrow::Cow;
+
+const SAMPLE_COUNT: usize = 8;
 
 /*
 #[repr(C)] #[derive(Clone)] pub struct Vertex([f32; 4]);
@@ -40,7 +43,7 @@ impl BufferData
     }
 }*/
 
-#[repr(C)] #[derive(Clone, Debug)]
+/*#[repr(C)] #[derive(Clone, Debug)]
 pub struct QBezierSegment([f32; 4], [f32; 4], [f32; 4]);
 impl QBezierSegment
 {
@@ -55,12 +58,12 @@ impl QBezierSegment
         let new_cp = center4(&p0, &p1);
         [QBezierSegment(self.0.clone(), p0, new_cp.clone()), QBezierSegment(new_cp, p1, self.2.clone())]
     }
-}
+}*/
 
 struct ShaderStore
 {
     v_curve_pre: fe::ShaderModule, v_pass_fill: fe::ShaderModule,
-    f_q_curve: fe::ShaderModule, f_white: fe::ShaderModule
+    f_white_curve: fe::ShaderModule, f_white: fe::ShaderModule
 }
 impl ShaderStore
 {
@@ -70,37 +73,29 @@ impl ShaderStore
         {
             v_curve_pre: fe::ShaderModule::from_file(device, "shaders/curve_pre.vso")?,
             v_pass_fill: fe::ShaderModule::from_file(device, "shaders/pass_fill.vso")?,
-            f_q_curve: fe::ShaderModule::from_file(device, "shaders/q_curve.fso")?,
+            f_white_curve: fe::ShaderModule::from_file(device, "shaders/white_curve.fso")?,
             f_white: fe::ShaderModule::from_file(device, "shaders/white.fso")?
         })
     }
 }
-const VBIND: &[fe::vk::VkVertexInputBindingDescription] = &[
+const VBIND_LB: &[fe::vk::VkVertexInputBindingDescription] = &[
     fe::vk::VkVertexInputBindingDescription
     {
         binding: 0, stride: std::mem::size_of::<f32>() as u32 * 2, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
     },
     fe::vk::VkVertexInputBindingDescription
     {
-        binding: 1, stride: std::mem::size_of::<f32>() as u32 * 4 * 3, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_INSTANCE
+        binding: 1, stride: std::mem::size_of::<BVertexLoopBlinnData>() as _, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
     }
 ];
-const VATTRS: &[fe::vk::VkVertexInputAttributeDescription] = &[
+const VATTRS_LB: &[fe::vk::VkVertexInputAttributeDescription] = &[
     fe::vk::VkVertexInputAttributeDescription
     {
         location: 0, binding: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32_SFLOAT
     },
     fe::vk::VkVertexInputAttributeDescription
     {
-        location: 1, binding: 1, offset: 0, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    },
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        location: 2, binding: 1, offset: 16, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    },
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        location: 3, binding: 1, offset: 32, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
+        location: 1, binding: 1, offset: 0, format: fe::vk::VK_FORMAT_R8G8B8A8_SINT
     }
 ];
 const VBIND_FILL_PF: &[fe::vk::VkVertexInputBindingDescription] = &[
@@ -115,18 +110,6 @@ const VATTRS_FILL_PF: &[fe::vk::VkVertexInputAttributeDescription] = &[
         location: 0, binding: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32_SFLOAT
     }
 ];
-/*const VBIND_FILL: &[fe::vk::VkVertexInputBindingDescription] = &[
-    fe::vk::VkVertexInputBindingDescription
-    {
-        binding: 0, stride: std::mem::size_of::<Vertex>() as _, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
-    }
-];
-const VATTRS_FILL: &[fe::vk::VkVertexInputAttributeDescription] = &[
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        binding: 0, location: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    }
-];*/
 
 struct App
 {
@@ -165,10 +148,20 @@ impl App
 }
 use pathfinder_partitioner::mesh::Mesh;
 use pathfinder_partitioner::BQuadVertexPositions;
+/*
+Buffer:
+[[Interior-Filling Positions(Vertex Buffer)]] - 0..
+[[Interior-Filling Indices(Index Buffer)]]    - interior_indices_offset..
+[[Loop-Blinn Curve Data(Vertex Buffer)]]      - bvlb_data_offset..
+[[Loop-Blinn Curve Positions(Vertex Buffer)]] - bvlb_pos_offset..
+[[Loop-Blinn Curve Indices(Index Buffer)]]    - bvlb_indices_offset..
+*/
 pub struct PathfinderRenderBuffers
 {
     buf: fe::Buffer, mem: fe::DeviceMemory,
-    interior_indices_offset: usize, drawn_vertices: usize
+    interior_indices_offset: usize, drawn_vertices: usize,
+    // bvlb: b-vertex(loop-blinn), Quadratic Bezier描画用データ
+    bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize, bvlb_vertices: usize
 }
 impl PathfinderRenderBuffers
 {
@@ -177,8 +170,30 @@ impl PathfinderRenderBuffers
         let pos_buf_size = mesh.b_quad_vertex_positions.len() * std::mem::size_of::<BQuadVertexPositions>();
         let interior_ibuf_size = mesh.b_quad_vertex_interior_indices.len() * std::mem::size_of::<u32>();
         let interior_indices_offset = pos_buf_size;
+        let bvlb_data_size = mesh.b_vertex_loop_blinn_data.len() * std::mem::size_of::<BVertexLoopBlinnData>();
+        let bvlb_data_offset = interior_indices_offset + interior_ibuf_size;
+        let bvlb_pos_size = mesh.b_vertex_positions.len() * std::mem::size_of::<f32>() * 2;
+        let bvlb_pos_offset = bvlb_data_offset + bvlb_data_size;
+        let bvlb_indices_offset = bvlb_pos_offset + bvlb_pos_size;
+        let mut bvlb_indices = Vec::new();
+        for bq in &mesh.b_quads
+        {
+            // active curve(upper)
+            if bq.upper_control_point_vertex_index != 0xffff_ffff
+            {
+                bvlb_indices.extend(vec![bq.upper_control_point_vertex_index, bq.upper_right_vertex_index, bq.upper_left_vertex_index]);
+            }
+            // active curve(lower)
+            if bq.lower_control_point_vertex_index != 0xffff_ffff
+            {
+                bvlb_indices.extend(vec![bq.lower_control_point_vertex_index, bq.lower_right_vertex_index, bq.lower_left_vertex_index]);
+            }
+        }
+        let bvlb_vertices = bvlb_indices.len();
+        let bvlb_render_buffer_size = if bvlb_vertices == 0 { 0 }
+            else { bvlb_data_size + bvlb_pos_size + bvlb_vertices * std::mem::size_of::<u32>() };
 
-        let bufsize = pos_buf_size + interior_ibuf_size;
+        let bufsize = pos_buf_size + interior_ibuf_size + bvlb_render_buffer_size;
         let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer().transfer_dest()).create(&f.device)?;
         let breq = buf.requirements();
         let mem = fe::DeviceMemory::allocate(&f.device, breq.size as _, f.device_memindex)?;
@@ -194,6 +209,13 @@ impl PathfinderRenderBuffers
             mapped.slice_mut(0, mesh.b_quad_vertex_positions.len()).clone_from_slice(&mesh.b_quad_vertex_positions);
             mapped.slice_mut(interior_indices_offset, mesh.b_quad_vertex_interior_indices.len())
                 .clone_from_slice(&mesh.b_quad_vertex_interior_indices);
+            if bvlb_vertices > 0
+            {
+                mapped.slice_mut(bvlb_data_offset, mesh.b_vertex_loop_blinn_data.len())
+                    .clone_from_slice(&mesh.b_vertex_loop_blinn_data);
+                mapped.slice_mut(bvlb_pos_offset, mesh.b_vertex_positions.len()).clone_from_slice(&mesh.b_vertex_positions);
+                mapped.slice_mut(bvlb_indices_offset, bvlb_vertices).clone_from_slice(&bvlb_indices);
+            }
         }
         unsafe { umem.unmap(); }
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
@@ -217,7 +239,8 @@ impl PathfinderRenderBuffers
         return Ok(PathfinderRenderBuffers
         {
             buf, mem, interior_indices_offset,
-            drawn_vertices: mesh.b_quad_vertex_interior_indices.len()
+            drawn_vertices: mesh.b_quad_vertex_interior_indices.len(),
+            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, bvlb_vertices
         })
     }
 }
@@ -270,14 +293,16 @@ impl EventDelegate for App
             device, adapter, instance, gq, _tq: tq, _d: d, device_memindex, upload_memindex
         };
 
+
         let mut fc = FontContext::new().unwrap();
-        let open_sans_regular = std::fs::File::open("OpenSans-Regular.ttf")
+        let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
             .and_then(|mut fp| { use std::io::prelude::*; let mut b = Vec::new(); fp.read_to_end(&mut b).map(|_| b) })
             .unwrap().into();
-        fc.add_font_from_memory(&0, open_sans_regular, 0).unwrap();
-        let font = FontInstance::new(&0, Au::from_px(24));
+        fc.add_font_from_memory(&0, fontfile, 0).unwrap();
+        // FontInstanceのサイズ指定はデバイス依存px単位
+        let font = FontInstance::new(&0, Au::from_f32_px(120.0 * 96.0 / 72.0));
         // text -> glyph indices
-        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello, world!".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
+        let glyphs = fc.load_glyph_indices_for_characters(&font, &"にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
@@ -285,19 +310,31 @@ impl EventDelegate for App
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
             let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
-            let rendered = left_offs + dim.origin.x as f32 / 96.0;
+            // println!("dimension?: {:?}", dim);
+            let rendered: f32 = left_offs;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
             let outline = fc.glyph_outline(&font, &g).unwrap();
             paths.extend(Transform2DPathIter::new(outline.iter(),
                 &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
-            left_offs += dim.advance;
-            max_height = max_height.max(dim.size.height as i32 as f32 / 96.0);
+            left_offs += dim.advance/* * 60.0*/;
+            max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
         }
+        /*{
+            let mut g = GlyphKey::new(glyphs[1] as _, SubpixelOffset(0));
+            let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
+            let rendered: f32 = left_offs;
+            g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
+            let outline = fc.glyph_outline(&font, &g).unwrap();
+            paths.extend(Transform2DPathIter::new(outline.iter(),
+                &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
+            left_offs += dim.advance/* * 60.0*/;
+            max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
+        }*/
         println!("left offset: {}", left_offs);
         println!("max height: {}", max_height);
         // text outlines -> pathfinder mesh
         let mut partitioner = Partitioner::new();
-        for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 48.0))
+        for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
         {
             partitioner.builder_mut().path_event(pe);
         }
@@ -306,8 +343,9 @@ impl EventDelegate for App
         partitioner.mesh_mut().push_stencil_segments(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
         partitioner.mesh_mut().push_stencil_normals(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
         let mesh = partitioner.into_mesh();
-        // println!("debug: b_quad_vertex_interior_indices: {:?}", mesh.b_quad_vertex_positions);
-        // println!("debug: b_quad_vertex_interior_indices: {:?}", mesh.b_quad_vertex_interior_indices);
+        // println!("debug: b_quads: {:?}", mesh.b_quads);
+        //println!("debug: b_vertex_positions: {:?}", mesh.b_vertex_positions);
+        // println!("debug: b_vertex_loop_blinn_data: {:?}", mesh.b_vertex_loop_blinn_data);
 
         /*let qb1 = QBezierSegment([-1.0, 1.0, 0.0, 1.0], [0.0, -1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0]);
         let [qb2, qb3] = qb1.split();
@@ -452,27 +490,37 @@ impl App
         let isr = fe::ImageSubresourceRange::color(0, 0);
         let bb_views = backbuffers.iter().map(|i| i.create_view(None, None, &fe::ComponentMapping::default(), &isr))
             .collect::<fe::Result<Vec<_>>>()?;
+        
+        let ms_dest = fe::ImageDesc::new(&surface_size, surface_format.format, fe::ImageUsage::COLOR_ATTACHMENT.transient_attachment(),
+            fe::ImageLayout::Undefined).sample_counts(SAMPLE_COUNT as _).create(&f.device)
+                .and_then(|r| ImageMemoryPair::new(r, f.device_memindex)).unwrap();
 
-        let rp = fe::RenderPassBuilder::new()
-            .add_attachment(fe::AttachmentDescription::new(surface_format.format,
-                fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
-                .load_op(fe::LoadOp::Clear).store_op(fe::StoreOp::Store))
-            .add_subpass(fe::SubpassDescription::new().add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, None))
-            .add_dependency(fe::vk::VkSubpassDependency
-            {
-                srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
-                srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
-                srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
-                dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
-            })
-            .create(&f.device).unwrap();
-        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&rp, &[iv], &surface_size, 1))
+        let mut rpb = fe::RenderPassBuilder::new();
+        rpb.add_attachments(vec![
+            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::ColorAttachmentOpt, fe::ImageLayout::ColorAttachmentOpt)
+                .load_op(fe::LoadOp::Clear).samples(SAMPLE_COUNT as _),
+            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
+                .store_op(fe::StoreOp::Store)
+        ]);
+        rpb.add_subpass(fe::SubpassDescription::new()
+            .add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, Some((1, fe::ImageLayout::ColorAttachmentOpt))));
+        rpb.add_dependency(fe::vk::VkSubpassDependency
+        {
+            srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
+            srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
+            srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
+            dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
+        });
+        let rp = rpb.create(&f.device).unwrap();
+        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&rp, &[&ms_dest.view, iv], &surface_size, 1))
             .collect::<fe::Result<Vec<_>>>()?;
 
         let fw = fe::Fence::new(&f.device, false).unwrap();
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
         let membarriers = bb_views.iter().map(|iv| fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&iv, 0, 0),
-            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc)).collect::<Vec<_>>();
+            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc))
+            .chain(vec![fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&ms_dest.view, 0, 0),
+                fe::ImageLayout::Undefined, fe::ImageLayout::ColorAttachmentOpt)]).collect::<Vec<_>>();
         init_commands[0].begin().unwrap()
             .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 true, &[], &[], &membarriers);
@@ -483,7 +531,7 @@ impl App
         
         Ok(Some(WindowRenderTargets
         {
-            swapchain, backbuffers: bb_views, framebuffers, renderpass: rp, size: surface_size
+            swapchain, backbuffers: bb_views, framebuffers, renderpass: rp, size: surface_size, ms_dest
         }))
     }
     fn populate_render_commands(&self) -> fe::Result<RenderCommands>
@@ -496,19 +544,29 @@ impl App
         let render_commands = f.cmdpool.alloc(rtvs.framebuffers.len() as _, true)?;
         for (c, fb) in render_commands.iter().zip(&rtvs.framebuffers)
         {
-            c.begin()?
-                .begin_render_pass(&rtvs.renderpass, fb, fe::vk::VkRect2D
-                {
-                    offset: fe::vk::VkOffset2D { x: 0, y: 0 },
-                    extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
-                }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
-                    .bind_graphics_pipeline_pair(&rds.gp_simple_fill, &res.pl)
-                    .bind_vertex_buffers(0, &[(&res.pf_bufs.buf, 0)])
-                    .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.interior_indices_offset, fe::IndexType::U32)
-                    .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
-                    .draw_indexed(res.pf_bufs.drawn_vertices as _, 1, 0, 0, 0)
+            let mut rec = c.begin()?;
+            rec.begin_render_pass(&rtvs.renderpass, fb, fe::vk::VkRect2D
+            {
+                offset: fe::vk::VkOffset2D { x: 0, y: 0 },
+                extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
+            }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
+                .bind_graphics_pipeline_pair(&rds.gp_simple_fill, &res.pl)
+                .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
+                .bind_vertex_buffers(0, &[(&res.pf_bufs.buf, 0)])
+                .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.interior_indices_offset, fe::IndexType::U32)
+                .draw_indexed(res.pf_bufs.drawn_vertices as _, 1, 0, 0, 0);
+            if res.pf_bufs.bvlb_vertices > 0
+            {
+                rec.bind_graphics_pipeline(&rds.gp_curve_fill)
+                    .bind_vertex_buffers(0, &[
+                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_pos_offset),
+                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_data_offset)
+                    ])
+                    .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.bvlb_indices_offset, fe::IndexType::U32)
+                    .draw_indexed(res.pf_bufs.bvlb_vertices as _, 1, 0, 0, 0);
+            }
                     // .bind_graphics_pipeline(&rds.gp_wire).draw(VERTEX_DATA.len() as _, 1, 0, 0)
-                .end_render_pass();
+            rec.end_render_pass();
         }
         Ok(RenderCommands(render_commands))
     }
@@ -534,13 +592,11 @@ impl App
 #[allow(dead_code)]
 struct WindowRenderTargets
 {
-    framebuffers: Vec<fe::Framebuffer>, renderpass: fe::RenderPass, backbuffers: Vec<fe::ImageView>,
+    framebuffers: Vec<fe::Framebuffer>, renderpass: fe::RenderPass,
+    ms_dest: ImageMemoryPair, backbuffers: Vec<fe::ImageView>,
     swapchain: fe::Swapchain, size: fe::Extent2D
 }
-struct RenderTargetDependentResources
-{
-    gp_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline, gp_wire: fe::Pipeline
-}
+struct RenderTargetDependentResources { gp_curve_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline }
 impl RenderTargetDependentResources
 {
     pub fn new(device: &fe::Device, res: &Resources, rtvs: &WindowRenderTargets) -> fe::Result<Self>
@@ -554,27 +610,29 @@ impl RenderTargetDependentResources
             offset: fe::vk::VkOffset2D { x: 0, y: 0 },
             extent: fe::vk::VkExtent2D { width: vp.width as _, height: vp.height as _ }
         };
-        let mut vps = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
-            VBIND, VATTRS, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        vps.fragment_shader(fe::PipelineShader::new(&res.shaders.f_q_curve, "main", None));
+        let mut ms = fe::MultisampleState::new();
+        ms.rasterization_samples(SAMPLE_COUNT).sample_shading(Some(1.0)).sample_mask(&[(1 << SAMPLE_COUNT) - 1]);
         let mut gpb = fe::GraphicsPipelineBuilder::new(&res.pl, (&rtvs.renderpass, 0));
-        gpb.vertex_processing(vps)
+        gpb.multisample_state(Some(&ms))
             .fixed_viewport_scissors(fe::DynamicArrayState::Static(&[vp]), fe::DynamicArrayState::Static(&[scis]))
             .add_attachment_blend(fe::AttachmentColorBlendState::premultiplied());
-        let gp_fill = gpb.create(device, None)?;
+        
         let mut vps_simple = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_pass_fill, "main", None),
             VBIND_FILL_PF, VATTRS_FILL_PF, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
         vps_simple.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white, "main", None));
         gpb.vertex_processing(vps_simple);
         let gp_simple_fill = gpb.create(device, None)?;
-        gpb.vertex_processing_mut().fragment_shader(fe::PipelineShader::new(&res.shaders.f_white, "main", None));
-        gpb.polygon_mode(fe::vk::VK_POLYGON_MODE_LINE);
-        let gp_wire = gpb.create(device, None)?;
+
+        let mut vps_curve = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
+            VBIND_LB, VATTRS_LB, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        vps_curve.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white_curve, "main", None));
+        gpb.vertex_processing(vps_curve);
+        let gp_curve_fill = gpb.create(device, None)?;
         
-        Ok(RenderTargetDependentResources { gp_fill, gp_simple_fill, gp_wire })
+        Ok(RenderTargetDependentResources { gp_curve_fill, gp_simple_fill })
     }
 }
-/*
+
 #[allow(dead_code)]
 struct ImageMemoryPair { view: fe::ImageView, image: fe::Image, memory: fe::DeviceMemory }
 impl ImageMemoryPair
@@ -588,6 +646,5 @@ impl ImageMemoryPair
         return Ok(ImageMemoryPair { view, image, memory })
     }
 }
-*/
 
 fn main() { std::process::exit(GUIApplication::run(App::new())); }
