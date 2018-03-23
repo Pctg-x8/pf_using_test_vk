@@ -7,6 +7,7 @@ extern crate pathfinder_font_renderer; use pathfinder_font_renderer::*;
 extern crate pathfinder_partitioner;
 use pathfinder_partitioner::partitioner::Partitioner;
 use pathfinder_partitioner::FillRule;
+use pathfinder_partitioner::BVertexLoopBlinnData;
 extern crate pathfinder_path_utils;
 use pathfinder_path_utils::cubic_to_quadratic::CubicToQuadraticTransformer;
 use pathfinder_path_utils::transform::Transform2DPathIter;
@@ -62,7 +63,7 @@ impl QBezierSegment
 struct ShaderStore
 {
     v_curve_pre: fe::ShaderModule, v_pass_fill: fe::ShaderModule,
-    f_q_curve: fe::ShaderModule, f_white: fe::ShaderModule
+    f_white_curve: fe::ShaderModule, f_white: fe::ShaderModule
 }
 impl ShaderStore
 {
@@ -72,37 +73,29 @@ impl ShaderStore
         {
             v_curve_pre: fe::ShaderModule::from_file(device, "shaders/curve_pre.vso")?,
             v_pass_fill: fe::ShaderModule::from_file(device, "shaders/pass_fill.vso")?,
-            f_q_curve: fe::ShaderModule::from_file(device, "shaders/q_curve.fso")?,
+            f_white_curve: fe::ShaderModule::from_file(device, "shaders/white_curve.fso")?,
             f_white: fe::ShaderModule::from_file(device, "shaders/white.fso")?
         })
     }
 }
-const VBIND: &[fe::vk::VkVertexInputBindingDescription] = &[
+const VBIND_LB: &[fe::vk::VkVertexInputBindingDescription] = &[
     fe::vk::VkVertexInputBindingDescription
     {
         binding: 0, stride: std::mem::size_of::<f32>() as u32 * 2, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
     },
     fe::vk::VkVertexInputBindingDescription
     {
-        binding: 1, stride: std::mem::size_of::<f32>() as u32 * 4 * 3, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_INSTANCE
+        binding: 1, stride: std::mem::size_of::<BVertexLoopBlinnData>() as _, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
     }
 ];
-const VATTRS: &[fe::vk::VkVertexInputAttributeDescription] = &[
+const VATTRS_LB: &[fe::vk::VkVertexInputAttributeDescription] = &[
     fe::vk::VkVertexInputAttributeDescription
     {
         location: 0, binding: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32_SFLOAT
     },
     fe::vk::VkVertexInputAttributeDescription
     {
-        location: 1, binding: 1, offset: 0, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    },
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        location: 2, binding: 1, offset: 16, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    },
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        location: 3, binding: 1, offset: 32, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
+        location: 1, binding: 1, offset: 0, format: fe::vk::VK_FORMAT_R8G8B8A8_SINT
     }
 ];
 const VBIND_FILL_PF: &[fe::vk::VkVertexInputBindingDescription] = &[
@@ -117,18 +110,6 @@ const VATTRS_FILL_PF: &[fe::vk::VkVertexInputAttributeDescription] = &[
         location: 0, binding: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32_SFLOAT
     }
 ];
-/*const VBIND_FILL: &[fe::vk::VkVertexInputBindingDescription] = &[
-    fe::vk::VkVertexInputBindingDescription
-    {
-        binding: 0, stride: std::mem::size_of::<Vertex>() as _, inputRate: fe::vk::VK_VERTEX_INPUT_RATE_VERTEX
-    }
-];
-const VATTRS_FILL: &[fe::vk::VkVertexInputAttributeDescription] = &[
-    fe::vk::VkVertexInputAttributeDescription
-    {
-        binding: 0, location: 0, offset: 0, format: fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT
-    }
-];*/
 
 struct App
 {
@@ -170,7 +151,9 @@ use pathfinder_partitioner::BQuadVertexPositions;
 pub struct PathfinderRenderBuffers
 {
     buf: fe::Buffer, mem: fe::DeviceMemory,
-    interior_indices_offset: usize, drawn_vertices: usize
+    interior_indices_offset: usize, drawn_vertices: usize,
+    // bvlb: b-vertex(loop-blinn), Quadratic Bezier描画用データ
+    bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize, bvlb_vertices: usize
 }
 impl PathfinderRenderBuffers
 {
@@ -179,8 +162,30 @@ impl PathfinderRenderBuffers
         let pos_buf_size = mesh.b_quad_vertex_positions.len() * std::mem::size_of::<BQuadVertexPositions>();
         let interior_ibuf_size = mesh.b_quad_vertex_interior_indices.len() * std::mem::size_of::<u32>();
         let interior_indices_offset = pos_buf_size;
+        let bvlb_data_size = mesh.b_vertex_loop_blinn_data.len() * std::mem::size_of::<BVertexLoopBlinnData>();
+        let bvlb_data_offset = interior_indices_offset + interior_ibuf_size;
+        let bvlb_pos_size = mesh.b_vertex_positions.len() * std::mem::size_of::<f32>() * 2;
+        let bvlb_pos_offset = bvlb_data_offset + bvlb_data_size;
+        let bvlb_indices_offset = bvlb_pos_offset + bvlb_pos_size;
+        let mut bvlb_indices = Vec::new();
+        for bq in &mesh.b_quads
+        {
+            // active curve(upper)
+            if bq.upper_control_point_vertex_index != 0xffff_ffff
+            {
+                bvlb_indices.extend(vec![bq.upper_control_point_vertex_index, bq.upper_right_vertex_index, bq.upper_left_vertex_index]);
+            }
+            // active curve(lower)
+            if bq.lower_control_point_vertex_index != 0xffff_ffff
+            {
+                bvlb_indices.extend(vec![bq.lower_control_point_vertex_index, bq.lower_right_vertex_index, bq.lower_left_vertex_index]);
+            }
+        }
+        let bvlb_vertices = bvlb_indices.len();
+        let bvlb_render_buffer_size = if bvlb_vertices == 0 { 0 }
+            else { bvlb_data_size + bvlb_pos_size + bvlb_vertices * std::mem::size_of::<u32>() };
 
-        let bufsize = pos_buf_size + interior_ibuf_size;
+        let bufsize = pos_buf_size + interior_ibuf_size + bvlb_render_buffer_size;
         let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer().transfer_dest()).create(&f.device)?;
         let breq = buf.requirements();
         let mem = fe::DeviceMemory::allocate(&f.device, breq.size as _, f.device_memindex)?;
@@ -196,6 +201,13 @@ impl PathfinderRenderBuffers
             mapped.slice_mut(0, mesh.b_quad_vertex_positions.len()).clone_from_slice(&mesh.b_quad_vertex_positions);
             mapped.slice_mut(interior_indices_offset, mesh.b_quad_vertex_interior_indices.len())
                 .clone_from_slice(&mesh.b_quad_vertex_interior_indices);
+            if bvlb_vertices > 0
+            {
+                mapped.slice_mut(bvlb_data_offset, mesh.b_vertex_loop_blinn_data.len())
+                    .clone_from_slice(&mesh.b_vertex_loop_blinn_data);
+                mapped.slice_mut(bvlb_pos_offset, mesh.b_vertex_positions.len()).clone_from_slice(&mesh.b_vertex_positions);
+                mapped.slice_mut(bvlb_indices_offset, bvlb_vertices).clone_from_slice(&bvlb_indices);
+            }
         }
         unsafe { umem.unmap(); }
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
@@ -219,7 +231,8 @@ impl PathfinderRenderBuffers
         return Ok(PathfinderRenderBuffers
         {
             buf, mem, interior_indices_offset,
-            drawn_vertices: mesh.b_quad_vertex_interior_indices.len()
+            drawn_vertices: mesh.b_quad_vertex_interior_indices.len(),
+            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, bvlb_vertices
         })
     }
 }
@@ -278,7 +291,7 @@ impl EventDelegate for App
             .unwrap().into();
         fc.add_font_from_memory(&0, open_sans_regular, 0).unwrap();
         // FontInstanceのサイズ指定はデバイス依存px単位
-        let font = FontInstance::new(&0, Au::from_f32_px(80.0 * 96.0 / 72.0));
+        let font = FontInstance::new(&0, Au::from_f32_px(10.0 * 96.0 / 72.0));
         // text -> glyph indices
         let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello, world!".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
@@ -288,7 +301,7 @@ impl EventDelegate for App
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
             let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
-            println!("dimension?: {:?}", dim);
+            // println!("dimension?: {:?}", dim);
             let rendered: f32 = left_offs;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
             let outline = fc.glyph_outline(&font, &g).unwrap();
@@ -297,8 +310,19 @@ impl EventDelegate for App
             left_offs += dim.advance/* * 60.0*/;
             max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
         }
-        println!("left offset: {}", left_offs);
-        println!("max height: {}", max_height);
+        /*{
+            let mut g = GlyphKey::new(glyphs[1] as _, SubpixelOffset(0));
+            let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
+            let rendered: f32 = left_offs;
+            g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
+            let outline = fc.glyph_outline(&font, &g).unwrap();
+            paths.extend(Transform2DPathIter::new(outline.iter(),
+                &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
+            left_offs += dim.advance/* * 60.0*/;
+            max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
+        }*/
+        // println!("left offset: {}", left_offs);
+        // println!("max height: {}", max_height);
         // text outlines -> pathfinder mesh
         let mut partitioner = Partitioner::new();
         for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
@@ -310,8 +334,9 @@ impl EventDelegate for App
         partitioner.mesh_mut().push_stencil_segments(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
         partitioner.mesh_mut().push_stencil_normals(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
         let mesh = partitioner.into_mesh();
-        // println!("debug: b_quad_vertex_interior_indices: {:?}", mesh.b_quad_vertex_positions);
-        // println!("debug: b_quad_vertex_interior_indices: {:?}", mesh.b_quad_vertex_interior_indices);
+        // println!("debug: b_quads: {:?}", mesh.b_quads);
+        //println!("debug: b_vertex_positions: {:?}", mesh.b_vertex_positions);
+        // println!("debug: b_vertex_loop_blinn_data: {:?}", mesh.b_vertex_loop_blinn_data);
 
         /*let qb1 = QBezierSegment([-1.0, 1.0, 0.0, 1.0], [0.0, -1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0]);
         let [qb2, qb3] = qb1.split();
@@ -510,19 +535,29 @@ impl App
         let render_commands = f.cmdpool.alloc(rtvs.framebuffers.len() as _, true)?;
         for (c, fb) in render_commands.iter().zip(&rtvs.framebuffers)
         {
-            c.begin()?
-                .begin_render_pass(&rtvs.renderpass, fb, fe::vk::VkRect2D
-                {
-                    offset: fe::vk::VkOffset2D { x: 0, y: 0 },
-                    extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
-                }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
-                    .bind_graphics_pipeline_pair(&rds.gp_simple_fill, &res.pl)
-                    .bind_vertex_buffers(0, &[(&res.pf_bufs.buf, 0)])
-                    .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.interior_indices_offset, fe::IndexType::U32)
-                    .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
-                    .draw_indexed(res.pf_bufs.drawn_vertices as _, 1, 0, 0, 0)
+            let mut rec = c.begin()?;
+            rec.begin_render_pass(&rtvs.renderpass, fb, fe::vk::VkRect2D
+            {
+                offset: fe::vk::VkOffset2D { x: 0, y: 0 },
+                extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
+            }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
+                .bind_graphics_pipeline_pair(&rds.gp_simple_fill, &res.pl)
+                .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
+                .bind_vertex_buffers(0, &[(&res.pf_bufs.buf, 0)])
+                .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.interior_indices_offset, fe::IndexType::U32)
+                .draw_indexed(res.pf_bufs.drawn_vertices as _, 1, 0, 0, 0);
+            if res.pf_bufs.bvlb_vertices > 0
+            {
+                rec.bind_graphics_pipeline(&rds.gp_curve_fill)
+                    .bind_vertex_buffers(0, &[
+                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_pos_offset),
+                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_data_offset)
+                    ])
+                    .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.bvlb_indices_offset, fe::IndexType::U32)
+                    .draw_indexed(res.pf_bufs.bvlb_vertices as _, 1, 0, 0, 0);
+            }
                     // .bind_graphics_pipeline(&rds.gp_wire).draw(VERTEX_DATA.len() as _, 1, 0, 0)
-                .end_render_pass();
+            rec.end_render_pass();
         }
         Ok(RenderCommands(render_commands))
     }
@@ -552,10 +587,7 @@ struct WindowRenderTargets
     ms_dest: ImageMemoryPair, backbuffers: Vec<fe::ImageView>,
     swapchain: fe::Swapchain, size: fe::Extent2D
 }
-struct RenderTargetDependentResources
-{
-    gp_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline, gp_wire: fe::Pipeline
-}
+struct RenderTargetDependentResources { gp_curve_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline }
 impl RenderTargetDependentResources
 {
     pub fn new(device: &fe::Device, res: &Resources, rtvs: &WindowRenderTargets) -> fe::Result<Self>
@@ -569,27 +601,26 @@ impl RenderTargetDependentResources
             offset: fe::vk::VkOffset2D { x: 0, y: 0 },
             extent: fe::vk::VkExtent2D { width: vp.width as _, height: vp.height as _ }
         };
-        let mut vps = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
-            VBIND, VATTRS, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        vps.fragment_shader(fe::PipelineShader::new(&res.shaders.f_q_curve, "main", None));
         let mut ms = fe::MultisampleState::new();
         ms.rasterization_samples(SAMPLE_COUNT).sample_shading(Some(1.0)).sample_mask(&[(1 << SAMPLE_COUNT) - 1]);
         let mut gpb = fe::GraphicsPipelineBuilder::new(&res.pl, (&rtvs.renderpass, 0));
-        gpb.vertex_processing(vps)
+        gpb.multisample_state(Some(&ms))
             .fixed_viewport_scissors(fe::DynamicArrayState::Static(&[vp]), fe::DynamicArrayState::Static(&[scis]))
             .add_attachment_blend(fe::AttachmentColorBlendState::premultiplied());
-        gpb.multisample_state(Some(&ms));
-        let gp_fill = gpb.create(device, None)?;
+        
         let mut vps_simple = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_pass_fill, "main", None),
             VBIND_FILL_PF, VATTRS_FILL_PF, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
         vps_simple.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white, "main", None));
         gpb.vertex_processing(vps_simple);
         let gp_simple_fill = gpb.create(device, None)?;
-        gpb.vertex_processing_mut().fragment_shader(fe::PipelineShader::new(&res.shaders.f_white, "main", None));
-        gpb.polygon_mode(fe::vk::VK_POLYGON_MODE_LINE);
-        let gp_wire = gpb.create(device, None)?;
+
+        let mut vps_curve = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
+            VBIND_LB, VATTRS_LB, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        vps_curve.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white_curve, "main", None));
+        gpb.vertex_processing(vps_curve);
+        let gp_curve_fill = gpb.create(device, None)?;
         
-        Ok(RenderTargetDependentResources { gp_fill, gp_simple_fill, gp_wire })
+        Ok(RenderTargetDependentResources { gp_curve_fill, gp_simple_fill })
     }
 }
 
