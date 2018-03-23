@@ -330,8 +330,8 @@ impl EventDelegate for App
             left_offs += dim.advance/* * 60.0*/;
             max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
         }*/
-        // println!("left offset: {}", left_offs);
-        // println!("max height: {}", max_height);
+        println!("left offset: {}", left_offs);
+        println!("max height: {}", max_height);
         // text outlines -> pathfinder mesh
         let mut partitioner = Partitioner::new();
         for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
