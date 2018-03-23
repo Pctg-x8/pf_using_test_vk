@@ -9,8 +9,7 @@ appframe = { git = "https://github.com/Pctg-x8/appframe", features = ["with_ferr
 ferrite = { git = "https://github.com/Pctg-x8/ferrite", features = ["FeImplements", "FePresentation"] }
 libc = "0.2"
 
-# pathfinder_font_renderer = { git = "https://github.com/Pctg-x8/pathfinder" }
-pathfinder_font_renderer = { path = "../foreign/pathfinder/font-renderer" }
+pathfinder_font_renderer = { git = "https://github.com/Pctg-x8/pathfinder" }
 pathfinder_partitioner = { git = "https://github.com/Pctg-x8/pathfinder" }
 pathfinder_path_utils = { git = "https://github.com/Pctg-x8/pathfinder" }
 app_units = "0.6"
