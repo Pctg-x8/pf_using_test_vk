@@ -303,7 +303,7 @@ impl EventDelegate for App
         println!("screen dpi: {}", screen_dpi);
         let font = FontInstance::new(&0, Au::from_f32_px(10.0 * screen_dpi / 72.0));
         // text -> glyph indices
-        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".encode_utf16().collect::<Vec<_>>()).unwrap();
+        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
