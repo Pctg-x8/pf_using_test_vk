@@ -301,7 +301,7 @@ impl EventDelegate for App
         // FontInstanceのサイズ指定はデバイス依存px単位
         let screen_dpi = screen_dpi();
         println!("screen dpi: {}", screen_dpi);
-        let font = FontInstance::new(&0, Au::from_f32_px(10.5 * screen_dpi / 72.0));
+        let font = FontInstance::new(&0, Au::from_f32_px(13.0 * screen_dpi / 72.0));
         // text -> glyph indices
         let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
@@ -663,4 +663,4 @@ fn main() { std::process::exit(GUIApplication::run(App::new())); }
     let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
     return (72.0 * backing_scale_factor.0) as f32;
 }
-#[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 96.0 }
+#[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 72.0 }
