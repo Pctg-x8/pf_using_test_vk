@@ -293,23 +293,24 @@ impl EventDelegate for App
             device, adapter, instance, gq, _tq: tq, _d: d, device_memindex, upload_memindex
         };
 
-
+        let screen_dpi = screen_dpi();
+        println!("screen dpi: {}", screen_dpi);
         let mut fc = FontContext::new().unwrap();
         let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
             .and_then(|mut fp| { use std::io::prelude::*; let mut b = Vec::new(); fp.read_to_end(&mut b).map(|_| b) })
             .unwrap().into();
         fc.add_font_from_memory(&0, fontfile, 0).unwrap();
         // FontInstanceのサイズ指定はデバイス依存px単位
-        let font = FontInstance::new(&0, Au::from_f32_px(120.0 * 96.0 / 72.0));
+        let font = FontInstance::new(&0, Au::from_f32_px(10.0 * screen_dpi / 72.0));
         // text -> glyph indices
-        let glyphs = fc.load_glyph_indices_for_characters(&font, &"にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
+        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
         for g in glyphs
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
-            let dim = fc.glyph_dimensions(&font, &g, false).unwrap();
+            let dim = fc.glyph_dimensions(&font, &g, true).unwrap();
             // println!("dimension?: {:?}", dim);
             let rendered: f32 = left_offs;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
@@ -648,3 +649,36 @@ impl ImageMemoryPair
 }
 
 fn main() { std::process::exit(GUIApplication::run(App::new())); }
+
+#[cfg(target_os = "macos")] #[macro_use] extern crate objc;
+#[cfg(target_os = "macos")] fn screen_dpi() -> f32
+{
+    use objc::runtime::*;
+    use libc::c_uint;
+    #[cfg(target_pointer_width = "64")] #[repr(C)] #[derive(Debug)] struct CGFloat(f64);
+    #[cfg(target_pointer_width = "32")] #[repr(C)] #[derive(Debug)] struct CGFloat(f32);
+    #[repr(C)] #[derive(Debug)] struct CGSize { width: CGFloat, height: CGFloat }
+    extern { static NSDeviceSize: *mut Object; }
+    extern "system" { fn CGDisplayScreenSize(display: c_uint) -> CGSize; }
+
+    let screen: *mut Object = unsafe { msg_send![Class::get("NSScreen").unwrap(), mainScreen] };
+    let description: *mut Object = unsafe { msg_send![screen, deviceDescription] };
+    let display_pt_size: *mut Object = unsafe { msg_send![description, objectForKey: NSDeviceSize] };
+    let display_pt_size: CGSize = unsafe { msg_send![display_pt_size, sizeValue] };
+    let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
+    let ns_screen_number: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "NSScreenNumber\0".as_ptr()] };
+    let screen_number: *mut Object = unsafe { msg_send![description, objectForKey: ns_screen_number] };
+    // let _: () = unsafe { msg_send![ns_screen_number, release] };
+    let screen_number: c_uint = unsafe { msg_send![screen_number, unsignedIntValue] };
+    let display_physical_size = unsafe { CGDisplayScreenSize(screen_number) };
+    let display_pixels = CGSize
+    {
+        width: CGFloat(display_pt_size.width.0 * backing_scale_factor.0),
+        height: CGFloat(display_pt_size.height.0 * backing_scale_factor.0)
+    };
+
+    // println!("displayPhysicalSize = {:?}", display_physical_size);
+    // println!("displayPixelSize = {:?}", display_pixels);
+    return (display_pixels.width.0 as f32 / display_physical_size.width.0 as f32) * 25.4;
+}
+#[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 96.0 }

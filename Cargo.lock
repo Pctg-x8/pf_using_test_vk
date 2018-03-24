@@ -241,7 +241,8 @@ dependencies = [
  "ferrite 1.1.70 (git+https://github.com/Pctg-x8/ferrite)",
  "libc 0.2.39 (registry+https://github.com/rust-lang/crates.io-index)",
  "lyon 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "pathfinder_font_renderer 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)",
+ "objc 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pathfinder_font_renderer 0.1.0",
  "pathfinder_partitioner 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)",
  "pathfinder_path_utils 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)",
 ]
@@ -344,7 +345,6 @@ dependencies = [
 [[package]]
 name = "pathfinder_font_renderer"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/pathfinder#5844aa7c766a8d75025cca3cf34383d9e7bbb852"
 dependencies = [
  "app_units 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "core-graphics 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -647,7 +647,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum num-traits 0.1.43 (registry+https://github.com/rust-lang/crates.io-index)" = "92e5113e9fd4cc14ded8e499429f396a20f98c772a47cc8622a736e1ec843c31"
 "checksum num-traits 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "dee092fcdf725aee04dd7da1d21debff559237d49ef1cb3e69bcb8ece44c7364"
 "checksum objc 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "877f30f37acef6749b1841cceab289707f211aecfc756553cd63976190e6cc2e"
-"checksum pathfinder_font_renderer 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)" = "<none>"
 "checksum pathfinder_partitioner 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)" = "<none>"
 "checksum pathfinder_path_utils 0.1.0 (git+https://github.com/Pctg-x8/pathfinder)" = "<none>"
 "checksum pkg-config 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)" = "3a8b4c6b8165cd1a1cd4b9b120978131389f64bdaf456435caa41e630edba903"
