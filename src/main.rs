@@ -303,7 +303,7 @@ impl EventDelegate for App
         println!("screen dpi: {}", screen_dpi);
         let font = FontInstance::new(&0, Au::from_f32_px(10.0 * screen_dpi / 72.0));
         // text -> glyph indices
-        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
+        let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".encode_utf16().collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
@@ -314,9 +314,11 @@ impl EventDelegate for App
             // println!("dimension?: {:?}", dim);
             let rendered: f32 = left_offs;
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
-            let outline = fc.glyph_outline(&font, &g).unwrap();
-            paths.extend(Transform2DPathIter::new(outline.iter(),
-                &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
+            if let Ok(outline) = fc.glyph_outline(&font, &g)
+            {
+                paths.extend(Transform2DPathIter::new(outline.iter(),
+                    &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
+            }
             left_offs += dim.advance/* * 60.0*/;
             max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
         }
