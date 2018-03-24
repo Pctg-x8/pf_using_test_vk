@@ -294,14 +294,16 @@ impl EventDelegate for App
         };
 
         let mut fc = FontContext::new().unwrap();
-        let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
+        /*let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
             .and_then(|mut fp| { use std::io::prelude::*; let mut b = Vec::new(); fp.read_to_end(&mut b).map(|_| b) })
             .unwrap().into();
-        fc.add_font_from_memory(&0, fontfile, 0).unwrap();
+        fc.add_font_from_memory(&0, fontfile, 0).unwrap();*/
+        // システムのデフォルトフォントを登録してみる
+        let font = system_message_font_instance(&mut fc, 0);
         // FontInstanceのサイズ指定はデバイス依存px単位
-        let screen_dpi = screen_dpi();
-        println!("screen dpi: {}", screen_dpi);
-        let font = FontInstance::new(&0, Au::from_f32_px(13.0 * screen_dpi / 72.0));
+        // let screen_dpi = screen_dpi();
+        // println!("screen dpi: {}", screen_dpi);
+        // let font = FontInstance::new(&0, Au::from_f32_px(13.0 * screen_dpi / 72.0));
         // text -> glyph indices
         let glyphs = fc.load_glyph_indices_for_characters(&font, &"Hello にゃーん".chars().map(|x| x as _).collect::<Vec<_>>()).unwrap();
         // glyph indices -> layouted text outlines
@@ -653,14 +655,53 @@ impl ImageMemoryPair
 fn main() { std::process::exit(GUIApplication::run(App::new())); }
 
 #[cfg(target_os = "macos")] #[macro_use] extern crate objc;
+#[cfg(target_os = "macos")] extern crate core_graphics;
+#[cfg(target_os = "macos")] extern crate core_text;
+#[cfg(target_os = "macos")] extern crate foreign_types_shared;
+#[cfg(target_os = "macos")] use objc::runtime::*;
+#[cfg(target_os = "macos")]
+#[cfg(target_pointer_width = "64")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f64);
+#[cfg(target_os = "macos")]
+#[cfg(target_pointer_width = "32")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f32);
 #[cfg(target_os = "macos")] fn screen_dpi() -> f32
 {
-    use objc::runtime::*;
-    #[cfg(target_pointer_width = "64")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f64);
-    #[cfg(target_pointer_width = "32")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f32);
-
     let screen: *mut Object = unsafe { msg_send![Class::get("NSScreen").unwrap(), mainScreen] };
     let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
     return (72.0 * backing_scale_factor.0) as f32;
 }
 #[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 72.0 }
+
+#[cfg(target_os = "macos")] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
+{
+    use core_graphics::font::CGFont;
+    use foreign_types_shared::ForeignType;
+    use libc::{c_void, c_long, c_char}; use std::ptr::null_mut;
+    extern "system"
+    {
+        fn CTFontCopyGraphicsFont(font: *mut c_void, attributes: *mut c_void) -> *mut c_void;
+        fn CTFontCopySupportedLanguages(font: *mut c_void) -> *mut c_void;
+        fn CFArrayGetCount(array: *const c_void) -> c_long;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: c_long) -> *const c_void;
+        fn CFStringGetCStringPtr(string: *const c_void, encoding: u32) -> *const c_char;
+        fn CFStringGetCString(string: *const c_void, buf: *mut c_char, bufferSize: c_long, encoding: u32) -> bool;
+    }
+    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+
+    // システムフォント(San Francisco/Helvetica Neue)は日本語に対応していない
+    // そのうちフォールバック機能をfont-rendererにつける必要がある
+    let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W3\0".as_ptr()] };
+    let nsfont: *mut Object = unsafe { msg_send![Class::get("NSFont").unwrap(), fontWithName: fontname size: CGFloat(0.0)] };
+    let _: () = unsafe { msg_send![fontname, release] };
+    let point_size: CGFloat = unsafe { msg_send![nsfont, pointSize] };
+    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont as *mut _, null_mut()) as *mut _) };
+    /*let languages = unsafe { CTFontCopySupportedLanguages(nsfont as *mut _) };
+    for n in 0 .. unsafe { CFArrayGetCount(languages) }
+    {
+        let sref = unsafe { CFArrayGetValueAtIndex(languages, n) };
+        let mut cstr = [0; 256];
+        unsafe { CFStringGetCString(sref, cstr.as_mut_ptr(), 256, kCFStringEncodingUTF8); }
+        println!("* {}", unsafe { std::ffi::CStr::from_ptr(cstr.as_ptr()).to_str().unwrap() });
+    }*/
+    fc.add_native_font(&key, cgfont).unwrap();
+    return FontInstance::new(&key, Au::from_f32_px(point_size.0 as f32 * screen_dpi() / 72.0));
+}

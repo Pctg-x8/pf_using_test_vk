@@ -19,3 +19,6 @@ euclid = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+core-graphics = "0.13"
+core-text = "9.2"
+foreign-types-shared = "0.1"
