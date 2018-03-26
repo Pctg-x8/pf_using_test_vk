@@ -19,46 +19,10 @@ use appframe::*;
 use ferrite as fe;
 use fe::traits::*;
 use std::rc::Rc;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::borrow::Cow;
 
 const SAMPLE_COUNT: usize = 8;
-
-/*
-#[repr(C)] #[derive(Clone)] pub struct Vertex([f32; 4]);
-#[repr(C)] #[derive(Clone)] pub struct BufferData { cpuvs: [[f32; 2]; 3], fill_data: [Vertex; 4] }
-static BUFFER_DATA: BufferData = BufferData
-{
-    cpuvs: [[0.0, 0.0], [0.5, 0.0], [1.0, 1.0]], fill_data: [
-        Vertex([-1.0, -1.0, 0.0, 1.0]), Vertex([1.0, -1.0, 0.0, 1.0]),
-        Vertex([-1.0, 1.0, 0.0, 1.0]), Vertex([1.0, 1.0, 0.0, 1.0])
-    ]
-};
-impl BufferData
-{
-    fn offset_of_fill_data() -> usize
-    {
-        use std::mem::transmute;
-        unsafe { transmute(&transmute::<_, &Self>(0usize).fill_data) }
-    }
-}*/
-
-/*#[repr(C)] #[derive(Clone, Debug)]
-pub struct QBezierSegment([f32; 4], [f32; 4], [f32; 4]);
-impl QBezierSegment
-{
-    pub fn split(&self) -> [QBezierSegment; 2]
-    {
-        fn center1(a: f32, b: f32) -> f32 { a + (b - a) * 0.5 }
-        fn center4(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4]
-        {
-            [center1(a[0], b[0]), center1(a[1], b[1]), center1(a[2], b[2]), center1(a[3], b[3])]
-        }
-        let (p0, p1) = (center4(&self.0, &self.1), center4(&self.1, &self.2));
-        let new_cp = center4(&p0, &p1);
-        [QBezierSegment(self.0.clone(), p0, new_cp.clone()), QBezierSegment(new_cp, p1, self.2.clone())]
-    }
-}*/
 
 struct ShaderStore
 {
@@ -114,9 +78,9 @@ const VATTRS_FILL_PF: &[fe::vk::VkVertexInputAttributeDescription] = &[
 struct App
 {
     rcmds: RefCell<Option<RenderCommands>>,
-    rtdres: RefCell<Option<RenderTargetDependentResources>>,
     rendertargets: RefCell<Option<WindowRenderTargets>>,
-    surface: RefCell<Option<fe::Surface>>,
+
+    surface: RefCell<Option<(fe::Surface, SurfaceDesc)>>,
     res: RefCell<Option<Resources>>,
     ferrite: RefCell<Option<Ferrite>>,
     w: RefCell<Option<NativeWindow<App>>>
@@ -128,12 +92,6 @@ pub struct Ferrite
     fence_command_completion: fe::Fence, device_memindex: u32, upload_memindex: u32,
     device: fe::Device, adapter: fe::PhysicalDevice, _d: fe::DebugReportCallback, instance: fe::Instance
 }
-pub struct Resources
-{
-    /*buf: fe::Buffer, _dmem: fe::DeviceMemory,*/
-    pf_bufs: PathfinderRenderBuffers, pl: fe::PipelineLayout, shaders: ShaderStore
-}
-pub struct RenderCommands(Vec<fe::CommandBuffer>);
 impl App
 {
     fn new() -> Self
@@ -142,7 +100,7 @@ impl App
         {
             w: RefCell::new(None), ferrite: RefCell::new(None),
             rcmds: RefCell::new(None), surface: RefCell::new(None), rendertargets: RefCell::new(None),
-            res: RefCell::new(None), rtdres: RefCell::new(None)
+            res: RefCell::new(None)
         }
     }
 }
@@ -283,7 +241,7 @@ impl EventDelegate for App
         let cmdpool = fe::CommandPool::new(&device, gq, false, false).unwrap();
         let device_memindex = memindices.find_device_local_index().unwrap();
         let upload_memindex = memindices.find_host_visible_index().unwrap();
-        let ferrite = Ferrite
+        *self.ferrite.borrow_mut() = Some(Ferrite
         {
             fence_command_completion: fe::Fence::new(&device, false).unwrap(),
             semaphore_sync_next: fe::Semaphore::new(&device).unwrap(),
@@ -291,7 +249,76 @@ impl EventDelegate for App
             tcmdpool: fe::CommandPool::new(&device, tq, false, false).unwrap(),
             cmdpool, queue, tqueue: device.queue(tq, if united_queue { 1 } else { 0 }),
             device, adapter, instance, gq, _tq: tq, _d: d, device_memindex, upload_memindex
-        };
+        });
+
+        let w = NativeWindowBuilder::new(640, 360, "Loop-Blinn Bezier Curve Drawing Example").create_renderable(server).unwrap();
+        *self.w.borrow_mut() = Some(w);
+        self.w.borrow().as_ref().unwrap().show();
+    }
+    fn on_init_view(&self, server: &GUIApplication<Self>, surface_onto: &NativeView<Self>)
+    {
+        let f = Ref::map(self.ferrite.borrow(), |o| o.as_ref().unwrap());
+
+        if !server.presentation_support(&f.adapter, f.gq) { panic!("Vulkan Rendering is not supported by platform"); }
+        let surface = server.create_surface(surface_onto, &f.instance).unwrap();
+        if !f.adapter.surface_support(f.gq, &surface).unwrap() { panic!("Vulkan Rendering is not supported to this surface"); }
+        let sd = SurfaceDesc::new(&surface, &f.adapter).unwrap();
+        *self.res.borrow_mut() = Some(Resources::new(&self.ferrite_ref(), &sd).unwrap());
+        let rtvs = WindowRenderTargets::new(&self.ferrite_ref(), &self.resources_ref(), &surface, &sd).unwrap().unwrap();
+        *self.surface.borrow_mut() = Some((surface, sd));
+        *self.rendertargets.borrow_mut() = Some(rtvs);
+        *self.rcmds.borrow_mut() = Some(self.populate_render_commands().unwrap());
+    }
+    fn on_render_period(&self)
+    {
+        if self.ensure_render_targets().unwrap()
+        {
+            if let Err(e) = self.render()
+            {
+                if e.0 == fe::vk::VK_ERROR_OUT_OF_DATE_KHR
+                {
+                    // Require to recreate resources(discarding resources)
+                    self.ferrite_ref().fence_command_completion.wait().unwrap();
+                    self.ferrite_ref().fence_command_completion.reset().unwrap();
+                    *self.rcmds.borrow_mut() = None;
+                    *self.rendertargets.borrow_mut() = None;
+
+                    // reissue rendering
+                    self.on_render_period();
+                }
+                else { let e: fe::Result<()> = Err(e); e.unwrap(); }
+            }
+        }
+    }
+}
+
+struct Resources
+{
+    /*buf: fe::Buffer, _dmem: fe::DeviceMemory,*/
+    gp_curve_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline,
+    pf_bufs: PathfinderRenderBuffers, pl: fe::PipelineLayout, rp: fe::RenderPass, shaders: ShaderStore
+}
+impl Resources
+{
+    fn new(f: &Ferrite, sd: &SurfaceDesc) -> fe::Result<Self>
+    {
+        let mut rpb = fe::RenderPassBuilder::new();
+        rpb.add_attachments(vec![
+            fe::AttachmentDescription::new(sd.format.format, fe::ImageLayout::ColorAttachmentOpt, fe::ImageLayout::ColorAttachmentOpt)
+                .load_op(fe::LoadOp::Clear).samples(SAMPLE_COUNT as _),
+            fe::AttachmentDescription::new(sd.format.format, fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
+                .store_op(fe::StoreOp::Store)
+        ]);
+        rpb.add_subpass(fe::SubpassDescription::new()
+            .add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, Some((1, fe::ImageLayout::ColorAttachmentOpt))));
+        rpb.add_dependency(fe::vk::VkSubpassDependency
+        {
+            srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
+            srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
+            srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
+            dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
+        });
+        let rp = rpb.create(&f.device)?;
 
         let mut fc = FontContext::new().unwrap();
         /*let fontfile = std::fs::File::open("NotoSansCJKjp-Regular.otf")
@@ -347,118 +374,50 @@ impl EventDelegate for App
         partitioner.builder_mut().build_and_reset();
         partitioner.mesh_mut().push_stencil_segments(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
         partitioner.mesh_mut().push_stencil_normals(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
-        let mesh = partitioner.into_mesh();
-        // println!("debug: b_quads: {:?}", mesh.b_quads);
-        //println!("debug: b_vertex_positions: {:?}", mesh.b_vertex_positions);
-        // println!("debug: b_vertex_loop_blinn_data: {:?}", mesh.b_vertex_loop_blinn_data);
+        let pf_bufs = PathfinderRenderBuffers::new(&f, partitioner.mesh())?;
 
-        /*let qb1 = QBezierSegment([-1.0, 1.0, 0.0, 1.0], [0.0, -1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0]);
-        let [qb2, qb3] = qb1.split();
-        let ([qb4, qb5], [qb6, qb7]) = (qb2.split(), qb3.split());
-        let controlpoints_size = std::mem::size_of::<QBezierSegment>() * 4;*/
-        
-        // let total_bufsize = std::mem::size_of::<BufferData>() + controlpoints_size;
-        /*let total_bufsize = mesh.b_quad_vertex_positions.len() * 2 * std::mem::size_of::<f32>() * 6
-            + mesh.b_quad_vertex_interior_indices.len() * std::mem::size_of::<u32>();
-        let buf = fe::BufferDesc::new(total_bufsize, fe::BufferUsage::VERTEX_BUFFER.transfer_dest()).create(&device).unwrap();
-        let memreq = buf.requirements();
-        let dmem = fe::DeviceMemory::allocate(&device, memreq.size as _, device_memindex).unwrap();
+        let shaders = ShaderStore::load(&f.device).unwrap();
+        let pl = fe::PipelineLayout::new(&f.device, &[], &[(fe::ShaderStage::VERTEX, 0 .. 8)])?;
+
+        let (gp_simple_fill, gp_curve_fill);
         {
-            let upload_buf = fe::BufferDesc::new(total_bufsize, fe::BufferUsage::VERTEX_BUFFER.transfer_src()).create(&device).unwrap();
-            let upload_memreq = upload_buf.requirements();
-            let upload_mem = fe::DeviceMemory::allocate(&device, upload_memreq.size as _, upload_memindex).unwrap();
-            buf.bind(&dmem, 0).unwrap(); upload_buf.bind(&upload_mem, 0).unwrap();
-            unsafe 
-            {
-                let mapped = upload_mem.map(0 .. total_bufsize).unwrap();
-                *mapped.get_mut(0) = BUFFER_DATA.clone();
-                mapped.slice_mut(std::mem::size_of::<BufferData>(), 4).clone_from_slice(&[qb4, qb5, qb6, qb7]);
-            }
-            let fw = fe::Fence::new(&device, false).unwrap();
-            let init_commands = cmdpool.alloc(1, true).unwrap();
-            init_commands[0].begin().unwrap()
-                .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::TRANSFER, true,
-                    &[], &[
-                        fe::BufferMemoryBarrier::new(&buf, 0 .. total_bufsize, 0, fe::AccessFlags::TRANSFER.write),
-                        fe::BufferMemoryBarrier::new(&upload_buf, 0 .. total_bufsize, 0, fe::AccessFlags::TRANSFER.read)
-                    ], &[])
-                .copy_buffer(&upload_buf, &buf, &[fe::vk::VkBufferCopy { srcOffset: 0, dstOffset: 0, size: total_bufsize as _ }])
-                .pipeline_barrier(fe::PipelineStageFlags::TRANSFER, fe::PipelineStageFlags::VERTEX_INPUT, true,
-                    &[], &[
-                        fe::BufferMemoryBarrier::new(&buf, 0 .. total_bufsize, fe::AccessFlags::TRANSFER.write,
-                            fe::AccessFlags::VERTEX_ATTRIBUTE_READ)
-                    ], &[]);
-            queue.submit(&[fe::SubmissionBatch
-            {
-                command_buffers: Cow::Borrowed(&init_commands), .. Default::default()
-            }], Some(&fw)).unwrap(); fw.wait().unwrap();
-        }*/
-        *self.res.borrow_mut() = Some(Resources
-        {
-            pf_bufs: PathfinderRenderBuffers::new(&ferrite, &mesh).unwrap(),
-            shaders: ShaderStore::load(&ferrite.device).unwrap(),
-            pl: fe::PipelineLayout::new(&ferrite.device, &[], &[(fe::ShaderStage::VERTEX, 0 .. 8)]).unwrap()
-        });
-        *self.ferrite.borrow_mut() = Some(ferrite);
+            let mut ms = fe::MultisampleState::new();
+            ms.rasterization_samples(SAMPLE_COUNT).sample_shading(Some(1.0)).sample_mask(&[(1 << SAMPLE_COUNT) - 1]);
+            let mut gpb = fe::GraphicsPipelineBuilder::new(&pl, (&rp, 0));
+            gpb .multisample_state(Some(&ms))
+                .fixed_viewport_scissors(fe::DynamicArrayState::Dynamic(1), fe::DynamicArrayState::Dynamic(1))
+                .add_attachment_blend(fe::AttachmentColorBlendState::premultiplied());
+            
+            let mut vps_simple = fe::VertexProcessingStages::new(fe::PipelineShader::new(&shaders.v_pass_fill, "main", None),
+                VBIND_FILL_PF, VATTRS_FILL_PF, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+            vps_simple.fragment_shader(fe::PipelineShader::new(&shaders.f_white, "main", None));
+            gpb.vertex_processing(vps_simple);
+            gp_simple_fill = gpb.create(&f.device, None)?;
 
-        let w = NativeWindowBuilder::new(640, 360, "Loop-Blinn Bezier Curve Drawing Example").create_renderable(server).unwrap();
-        *self.w.borrow_mut() = Some(w);
-        self.w.borrow().as_ref().unwrap().show();
-    }
-    fn on_init_view(&self, server: &GUIApplication<Self>, surface_onto: &NativeView<Self>)
-    {
-        let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-
-        if !server.presentation_support(&f.adapter, f.gq) { panic!("Vulkan Rendering is not supported by platform"); }
-        let surface = server.create_surface(surface_onto, &f.instance).unwrap();
-        if !f.adapter.surface_support(f.gq, &surface).unwrap() { panic!("Vulkan Rendering is not supported to this surface"); }
-        *self.surface.borrow_mut() = Some(surface);
-        let rtvs = self.init_swapchains().unwrap().unwrap();
-        *self.rtdres.borrow_mut() = Some(RenderTargetDependentResources::new(&f.device,
-            self.res.borrow().as_ref().unwrap(), &rtvs).unwrap());
-        *self.rendertargets.borrow_mut() = Some(rtvs);
-        *self.rcmds.borrow_mut() = Some(self.populate_render_commands().unwrap());
-    }
-    fn on_render_period(&self)
-    {
-        if self.ensure_render_targets().unwrap()
-        {
-            if let Err(e) = self.render()
-            {
-                if e.0 == fe::vk::VK_ERROR_OUT_OF_DATE_KHR
-                {
-                    // Require to recreate resources(discarding resources)
-                    let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-
-                    f.fence_command_completion.wait().unwrap(); f.fence_command_completion.reset().unwrap();
-                    *self.rcmds.borrow_mut() = None;
-                    *self.rtdres.borrow_mut() = None;
-                    *self.rendertargets.borrow_mut() = None;
-
-                    // reissue rendering
-                    self.on_render_period();
-                }
-                else { let e: fe::Result<()> = Err(e); e.unwrap(); }
-            }
+            let mut vps_curve = fe::VertexProcessingStages::new(fe::PipelineShader::new(&shaders.v_curve_pre, "main", None),
+                VBIND_LB, VATTRS_LB, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+            vps_curve.fragment_shader(fe::PipelineShader::new(&shaders.f_white_curve, "main", None));
+            gpb.vertex_processing(vps_curve);
+            gp_curve_fill = gpb.create(&f.device, None)?;
         }
+
+        return Ok(Resources { pf_bufs, gp_curve_fill, gp_simple_fill, pl, rp, shaders })
     }
 }
+pub struct RenderCommands(Vec<fe::CommandBuffer>);
 impl App
 {
+    fn ferrite_ref(&self) -> Ref<Ferrite> { Ref::map(self.ferrite.borrow(), |f| f.as_ref().unwrap()) }
+    fn resources_ref(&self) -> Ref<Resources> { Ref::map(self.res.borrow(), |r| r.as_ref().unwrap()) }
+
     fn ensure_render_targets(&self) -> fe::Result<bool>
     {
         if self.rendertargets.borrow().is_none()
         {
-            let rtv = self.init_swapchains()?;
+            let s2 = Ref::map(self.surface.borrow(), |r| r.as_ref().unwrap());
+            let rtv = WindowRenderTargets::new(&self.ferrite_ref(), &self.resources_ref(), &s2.0, &s2.1)?;
             if rtv.is_none() { return Ok(false); }
             *self.rendertargets.borrow_mut() = rtv;
-        }
-        if self.rtdres.borrow().is_none()
-        {
-            let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-            let resr = self.res.borrow(); let res = resr.as_ref().unwrap();
-            *self.rtdres.borrow_mut() = Some(RenderTargetDependentResources::new(&f.device, res,
-                self.rendertargets.borrow().as_ref().unwrap())?);
         }
         if self.rcmds.borrow().is_none()
         {
@@ -466,111 +425,46 @@ impl App
         }
         Ok(true)
     }
-    fn init_swapchains(&self) -> fe::Result<Option<WindowRenderTargets>>
-    {
-        let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-        let sr = self.surface.borrow(); let s = sr.as_ref().unwrap();
-
-        let surface_caps = f.adapter.surface_capabilities(s)?;
-        let surface_format = f.adapter.surface_formats(s)?.into_iter()
-            .find(|f| fe::FormatQuery(f.format).eq_bit_width(32).is_component_of(fe::FormatComponents::RGBA).has_element_of(fe::ElementType::UNORM).passed()).unwrap();
-        let surface_pm = f.adapter.surface_present_modes(s)?.remove(0);
-        let surface_ca = if (surface_caps.supportedCompositeAlpha & fe::CompositeAlpha::PostMultiplied as u32) != 0
-        {
-            fe::CompositeAlpha::PostMultiplied
-        }
-        else { fe::CompositeAlpha::Opaque };
-        let surface_size = match surface_caps.currentExtent
-        {
-            fe::vk::VkExtent2D { width: 0xffff_ffff, height: 0xffff_ffff } => fe::Extent2D(640, 360),
-            fe::vk::VkExtent2D { width, height } => fe::Extent2D(width, height)
-        };
-        if surface_size.0 <= 0 || surface_size.1 <= 0 { return Ok(None); }
-        let swapchain = fe::SwapchainBuilder::new(s, surface_caps.minImageCount.max(2),
-            &surface_format, &surface_size, fe::ImageUsage::COLOR_ATTACHMENT)
-                .present_mode(surface_pm).pre_transform(fe::SurfaceTransform::Identity)
-                .composite_alpha(surface_ca).create(&f.device)?;
-        // acquire_nextより前にやらないと死ぬ(get_images)
-        let backbuffers = swapchain.get_images()?;
-        let isr = fe::ImageSubresourceRange::color(0, 0);
-        let bb_views = backbuffers.iter().map(|i| i.create_view(None, None, &fe::ComponentMapping::default(), &isr))
-            .collect::<fe::Result<Vec<_>>>()?;
-        
-        let ms_dest = fe::ImageDesc::new(&surface_size, surface_format.format, fe::ImageUsage::COLOR_ATTACHMENT.transient_attachment(),
-            fe::ImageLayout::Undefined).sample_counts(SAMPLE_COUNT as _).create(&f.device)
-                .and_then(|r| ImageMemoryPair::new(r, f.device_memindex)).unwrap();
-
-        let mut rpb = fe::RenderPassBuilder::new();
-        rpb.add_attachments(vec![
-            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::ColorAttachmentOpt, fe::ImageLayout::ColorAttachmentOpt)
-                .load_op(fe::LoadOp::Clear).samples(SAMPLE_COUNT as _),
-            fe::AttachmentDescription::new(surface_format.format, fe::ImageLayout::PresentSrc, fe::ImageLayout::PresentSrc)
-                .store_op(fe::StoreOp::Store)
-        ]);
-        rpb.add_subpass(fe::SubpassDescription::new()
-            .add_color_output(0, fe::ImageLayout::ColorAttachmentOpt, Some((1, fe::ImageLayout::ColorAttachmentOpt))));
-        rpb.add_dependency(fe::vk::VkSubpassDependency
-        {
-            srcSubpass: fe::vk::VK_SUBPASS_EXTERNAL, dstSubpass: 0,
-            srcStageMask: fe::PipelineStageFlags::TOP_OF_PIPE.0, dstStageMask: fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT.0,
-            srcAccessMask: fe::AccessFlags::MEMORY.read, dstAccessMask: fe::AccessFlags::COLOR_ATTACHMENT.write,
-            dependencyFlags: fe::vk::VK_DEPENDENCY_BY_REGION_BIT
-        });
-        let rp = rpb.create(&f.device).unwrap();
-        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&rp, &[&ms_dest.view, iv], &surface_size, 1))
-            .collect::<fe::Result<Vec<_>>>()?;
-
-        let fw = fe::Fence::new(&f.device, false).unwrap();
-        let init_commands = f.cmdpool.alloc(1, true).unwrap();
-        let membarriers = bb_views.iter().map(|iv| fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&iv, 0, 0),
-            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc))
-            .chain(vec![fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&ms_dest.view, 0, 0),
-                fe::ImageLayout::Undefined, fe::ImageLayout::ColorAttachmentOpt)]).collect::<Vec<_>>();
-        init_commands[0].begin().unwrap()
-            .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                true, &[], &[], &membarriers);
-        f.queue.submit(&[fe::SubmissionBatch
-        {
-            command_buffers: Cow::Borrowed(&init_commands), .. Default::default()
-        }], Some(&fw)).unwrap(); fw.wait().unwrap();
-        
-        Ok(Some(WindowRenderTargets
-        {
-            swapchain, backbuffers: bb_views, framebuffers, renderpass: rp, size: surface_size, ms_dest
-        }))
-    }
     fn populate_render_commands(&self) -> fe::Result<RenderCommands>
     {
-        let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-        let rtvr = self.rendertargets.borrow(); let rtvs = rtvr.as_ref().unwrap();
-        let resr = self.res.borrow(); let res = resr.as_ref().unwrap();
-        let rdsr = self.rtdres.borrow(); let rds = rdsr.as_ref().unwrap();
+        let (f, r) = (self.ferrite_ref(), self.resources_ref());
+        let rtvs = Ref::map(self.rendertargets.borrow(), |v| v.as_ref().unwrap());
+
+        let vp = fe::vk::VkViewport
+        {
+            x: 0.0, y: 0.0, width: rtvs.size.0 as _, height: rtvs.size.1 as _, minDepth: 0.0, maxDepth: 1.0
+        };
+        let scis = fe::vk::VkRect2D
+        {
+            offset: fe::vk::VkOffset2D { x: 0, y: 0 },
+            extent: fe::vk::VkExtent2D { width: vp.width as _, height: vp.height as _ }
+        };
 
         let render_commands = f.cmdpool.alloc(rtvs.framebuffers.len() as _, true)?;
         for (c, fb) in render_commands.iter().zip(&rtvs.framebuffers)
         {
             let mut rec = c.begin()?;
-            rec.begin_render_pass(&rtvs.renderpass, fb, fe::vk::VkRect2D
+            rec.begin_render_pass(&r.rp, fb, fe::vk::VkRect2D
             {
                 offset: fe::vk::VkOffset2D { x: 0, y: 0 },
                 extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
             }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
-                .bind_graphics_pipeline_pair(&rds.gp_simple_fill, &res.pl)
+                .bind_graphics_pipeline_pair(&r.gp_simple_fill, &r.pl)
+                .set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()])
                 .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
-                .bind_vertex_buffers(0, &[(&res.pf_bufs.buf, 0)])
-                .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.interior_indices_offset, fe::IndexType::U32)
-                .draw_indexed(res.pf_bufs.drawn_vertices as _, 1, 0, 0, 0);
-            if res.pf_bufs.bvlb_vertices > 0
+                .bind_vertex_buffers(0, &[(&r.pf_bufs.buf, 0)])
+                .bind_index_buffer(&r.pf_bufs.buf, r.pf_bufs.interior_indices_offset, fe::IndexType::U32)
+                .draw_indexed(r.pf_bufs.drawn_vertices as _, 1, 0, 0, 0);
+            if r.pf_bufs.bvlb_vertices > 0
             {
-                rec.bind_graphics_pipeline(&rds.gp_curve_fill)
+                rec.bind_graphics_pipeline(&r.gp_curve_fill)
                     .bind_vertex_buffers(0, &[
-                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_pos_offset),
-                        (&res.pf_bufs.buf, res.pf_bufs.bvlb_data_offset)
+                        (&r.pf_bufs.buf, r.pf_bufs.bvlb_pos_offset),
+                        (&r.pf_bufs.buf, r.pf_bufs.bvlb_data_offset)
                     ])
-                    .bind_index_buffer(&res.pf_bufs.buf, res.pf_bufs.bvlb_indices_offset, fe::IndexType::U32)
-                    .draw_indexed(res.pf_bufs.bvlb_vertices as _, 1, 0, 0, 0);
+                    .bind_index_buffer(&r.pf_bufs.buf, r.pf_bufs.bvlb_indices_offset, fe::IndexType::U32)
+                    .draw_indexed(r.pf_bufs.bvlb_vertices as _, 1, 0, 0, 0);
             }
-                    // .bind_graphics_pipeline(&rds.gp_wire).draw(VERTEX_DATA.len() as _, 1, 0, 0)
             rec.end_render_pass();
         }
         Ok(RenderCommands(render_commands))
@@ -594,47 +488,79 @@ impl App
         f.fence_command_completion.wait()?; f.fence_command_completion.reset()?; Ok(())
     }
 }
+struct SurfaceDesc
+{
+    format: fe::vk::VkSurfaceFormatKHR, present_mode: fe::PresentMode, composite_alpha: fe::CompositeAlpha
+}
+impl SurfaceDesc
+{
+    pub fn new(s: &fe::Surface, adapter: &fe::PhysicalDevice) -> fe::Result<Self>
+    {
+        let surface_caps = adapter.surface_capabilities(s)?;
+        let format = adapter.surface_formats(s)?.into_iter()
+            .find(|f| fe::FormatQuery(f.format).eq_bit_width(32).is_component_of(fe::FormatComponents::RGBA).has_element_of(fe::ElementType::UNORM).passed()).unwrap();
+        let present_mode = adapter.surface_present_modes(s)?.remove(0);
+        let composite_alpha = if (surface_caps.supportedCompositeAlpha & fe::CompositeAlpha::PostMultiplied as u32) != 0
+        {
+            fe::CompositeAlpha::PostMultiplied
+        }
+        else { fe::CompositeAlpha::Opaque };
+
+        return Ok(SurfaceDesc { format, present_mode, composite_alpha });
+    }
+}
 #[allow(dead_code)]
 struct WindowRenderTargets
 {
-    framebuffers: Vec<fe::Framebuffer>, renderpass: fe::RenderPass,
-    ms_dest: ImageMemoryPair, backbuffers: Vec<fe::ImageView>,
+    framebuffers: Vec<fe::Framebuffer>, ms_dest: ImageMemoryPair, backbuffers: Vec<fe::ImageView>,
     swapchain: fe::Swapchain, size: fe::Extent2D
 }
-struct RenderTargetDependentResources { gp_curve_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline }
-impl RenderTargetDependentResources
+impl WindowRenderTargets
 {
-    pub fn new(device: &fe::Device, res: &Resources, rtvs: &WindowRenderTargets) -> fe::Result<Self>
+    fn new(f: &Ferrite, r: &Resources, s: &fe::Surface, sd: &SurfaceDesc) -> fe::Result<Option<Self>>
     {
-        let vp = fe::vk::VkViewport
+        let surface_caps = f.adapter.surface_capabilities(s)?;
+        let surface_size = match surface_caps.currentExtent
         {
-            x: 0.0, y: 0.0, width: rtvs.size.0 as _, height: rtvs.size.1 as _, minDepth: 0.0, maxDepth: 1.0
+            fe::vk::VkExtent2D { width: 0xffff_ffff, height: 0xffff_ffff } => fe::Extent2D(640, 360),
+            fe::vk::VkExtent2D { width, height } => fe::Extent2D(width, height)
         };
-        let scis = fe::vk::VkRect2D
-        {
-            offset: fe::vk::VkOffset2D { x: 0, y: 0 },
-            extent: fe::vk::VkExtent2D { width: vp.width as _, height: vp.height as _ }
-        };
-        let mut ms = fe::MultisampleState::new();
-        ms.rasterization_samples(SAMPLE_COUNT).sample_shading(Some(1.0)).sample_mask(&[(1 << SAMPLE_COUNT) - 1]);
-        let mut gpb = fe::GraphicsPipelineBuilder::new(&res.pl, (&rtvs.renderpass, 0));
-        gpb.multisample_state(Some(&ms))
-            .fixed_viewport_scissors(fe::DynamicArrayState::Static(&[vp]), fe::DynamicArrayState::Static(&[scis]))
-            .add_attachment_blend(fe::AttachmentColorBlendState::premultiplied());
+        if surface_size.0 <= 0 || surface_size.1 <= 0 { return Ok(None); }
+        let swapchain = fe::SwapchainBuilder::new(s, surface_caps.minImageCount.max(2),
+            &sd.format, &surface_size, fe::ImageUsage::COLOR_ATTACHMENT)
+                .present_mode(sd.present_mode).pre_transform(fe::SurfaceTransform::Identity)
+                .composite_alpha(sd.composite_alpha).create(&f.device)?;
+        // acquire_nextより前にやらないと死ぬ(get_images)
+        let backbuffers = swapchain.get_images()?;
+        let isr = fe::ImageSubresourceRange::color(0, 0);
+        let bb_views = backbuffers.iter().map(|i| i.create_view(None, None, &fe::ComponentMapping::default(), &isr))
+            .collect::<fe::Result<Vec<_>>>()?;
         
-        let mut vps_simple = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_pass_fill, "main", None),
-            VBIND_FILL_PF, VATTRS_FILL_PF, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        vps_simple.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white, "main", None));
-        gpb.vertex_processing(vps_simple);
-        let gp_simple_fill = gpb.create(device, None)?;
+        let ms_dest = fe::ImageDesc::new(&surface_size, sd.format.format,
+            fe::ImageUsage::COLOR_ATTACHMENT.transient_attachment(),
+            fe::ImageLayout::Undefined).sample_counts(SAMPLE_COUNT as _).create(&f.device)?;
+        let ms_dest = ImageMemoryPair::new(ms_dest, f.device_memindex)?;
 
-        let mut vps_curve = fe::VertexProcessingStages::new(fe::PipelineShader::new(&res.shaders.v_curve_pre, "main", None),
-            VBIND_LB, VATTRS_LB, fe::vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        vps_curve.fragment_shader(fe::PipelineShader::new(&res.shaders.f_white_curve, "main", None));
-        gpb.vertex_processing(vps_curve);
-        let gp_curve_fill = gpb.create(device, None)?;
+        let framebuffers = bb_views.iter().map(|iv| fe::Framebuffer::new(&r.rp, &[&ms_dest.view, iv], &surface_size, 1))
+            .collect::<fe::Result<Vec<_>>>()?;
+
+        let init_commands = f.cmdpool.alloc(1, true).unwrap();
+        let membarriers = bb_views.iter().map(|iv| fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&iv, 0, 0),
+            fe::ImageLayout::Undefined, fe::ImageLayout::PresentSrc))
+            .chain(vec![fe::ImageMemoryBarrier::new(&fe::ImageSubref::color(&ms_dest.view, 0, 0),
+                fe::ImageLayout::Undefined, fe::ImageLayout::ColorAttachmentOpt)]).collect::<Vec<_>>();
+        init_commands[0].begin().unwrap()
+            .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                true, &[], &[], &membarriers);
+        f.queue.submit(&[fe::SubmissionBatch
+        {
+            command_buffers: Cow::Borrowed(&init_commands), .. Default::default()
+        }], None)?; f.queue.wait()?;
         
-        Ok(RenderTargetDependentResources { gp_curve_fill, gp_simple_fill })
+        return Ok(Some(WindowRenderTargets
+        {
+            swapchain, backbuffers: bb_views, framebuffers, size: surface_size, ms_dest
+        }));
     }
 }
 
@@ -704,4 +630,21 @@ fn main() { std::process::exit(GUIApplication::run(App::new())); }
     }*/
     fc.add_native_font(&key, cgfont).unwrap();
     return FontInstance::new(&key, Au::from_f32_px(point_size.0 as f32 * screen_dpi() / 72.0));
+}
+#[cfg(windows)] extern crate winapi;
+#[cfg(windows)] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
+{
+    use winapi::um::winuser::*;
+
+    // Windowsのシステムフォントはおおよそ日本語に対応してくれているのでそのまま使える
+    let mut ncm = NONCLIENTMETRICSA
+    {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSA>() as _,
+        .. unsafe { std::mem::uninitialized() }
+    };
+    unsafe { SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, ncm.cbSize, &mut ncm as *mut NONCLIENTMETRICSA as *mut _, 0) };
+    println!("font size: {}", -ncm.lfMessageFont.lfHeight);
+    let font_name = unsafe { std::ffi::CStr::from_ptr(ncm.lfMessageFont.lfFaceName.as_ptr()).to_str().unwrap() };
+    fc.add_system_font(&key, font_name, 0).unwrap();
+    return FontInstance::new(&key, Au::from_px(-ncm.lfMessageFont.lfHeight));
 }
