@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["S.Percentage <Syn.Tri.Naga@gmail.com>"]
 build = "build.rs"
 
+[features]
+StemDarkening = []
+
 [dependencies]
 appframe = { git = "https://github.com/Pctg-x8/appframe", features = ["with_ferrite", "manual_rendering"] }
 ferrite = { git = "https://github.com/Pctg-x8/ferrite", features = ["FeImplements", "FePresentation"] }

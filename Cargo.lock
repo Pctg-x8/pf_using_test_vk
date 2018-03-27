@@ -174,7 +174,7 @@ dependencies = [
 [[package]]
 name = "ferrite"
 version = "1.1.70"
-source = "git+https://github.com/Pctg-x8/ferrite#055446e60db3bf1b92f0f9b76d12e3fcb0882e56"
+source = "git+https://github.com/Pctg-x8/ferrite#e8f3cab68ff1febf911688136f4c19b7c0996ec1"
 dependencies = [
  "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

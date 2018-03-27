@@ -9,7 +9,7 @@ use pathfinder_partitioner::partitioner::Partitioner;
 use pathfinder_partitioner::FillRule;
 use pathfinder_partitioner::BVertexLoopBlinnData;
 extern crate pathfinder_path_utils;
-use pathfinder_path_utils::cubic_to_quadratic::CubicToQuadraticTransformer;
+// use pathfinder_path_utils::cubic_to_quadratic::CubicToQuadraticTransformer;
 use pathfinder_path_utils::transform::Transform2DPathIter;
 extern crate app_units; use app_units::Au;
 extern crate lyon; use lyon::path::builder::{FlatPathBuilder, PathBuilder};
@@ -75,6 +75,13 @@ const VATTRS_FILL_PF: &[fe::vk::VkVertexInputAttributeDescription] = &[
     }
 ];
 
+// Pathfinder Rendering PushConstants //
+const PF_DIRECT_RENDER_RT_PIXELS_OFFSET: u32 = 0;
+const PF_DIRECT_RENDER_GLYPH_INDEX_OFFSET: u32 = 4 * 2;
+const PF_DIRECT_RENDER_PUSH_CONSTANT_LAYOUT: &[(fe::ShaderStage, Range<u32>)] = &[
+    (fe::ShaderStage::VERTEX, PF_DIRECT_RENDER_RT_PIXELS_OFFSET .. PF_DIRECT_RENDER_RT_PIXELS_OFFSET + 4 * 3)
+];
+
 struct App
 {
     rcmds: RefCell<Option<RenderCommands>>,
@@ -106,6 +113,9 @@ impl App
 }
 use pathfinder_partitioner::mesh::Mesh;
 use pathfinder_partitioner::BQuadVertexPositions;
+use std::ops::Range;
+#[repr(C)] #[derive(Clone, Debug)]
+pub struct GlyphTransform { st: [f32; 4], ext: [f32; 2], pad: [f32; 2] }
 /*
 Buffer:
 [[Interior-Filling Positions(Vertex Buffer)]] - 0..
@@ -116,43 +126,75 @@ Buffer:
 */
 pub struct PathfinderRenderBuffers
 {
-    buf: fe::Buffer, mem: fe::DeviceMemory,
-    interior_indices_offset: usize, drawn_vertices: usize,
+    buf: fe::Buffer, #[allow(dead_code)] mem: fe::DeviceMemory,
+    transform_set: Option<(fe::vk::VkDescriptorSet, fe::BufferView, fe::DescriptorPool)>,
+    interior_indices_offset: usize, interior_vertex_range_per_mesh: Vec<Range<usize>>,
     // bvlb: b-vertex(loop-blinn), Quadratic Bezier描画用データ
-    bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize, bvlb_vertices: usize
+    bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize,
+    bvlb_vertex_range_per_mesh: Vec<Range<usize>>
 }
 impl PathfinderRenderBuffers
 {
-    pub fn new(f: &Ferrite, mesh: &Mesh) -> fe::Result<Self>
+    pub fn new(f: &Ferrite, utb_desc_layout: &fe::DescriptorSetLayout,
+        mesh: Vec<Mesh>, transforms: Option<Vec<GlyphTransform>>) -> fe::Result<Self>
     {
-        let pos_buf_size = mesh.b_quad_vertex_positions.len() * std::mem::size_of::<BQuadVertexPositions>();
-        let interior_ibuf_size = mesh.b_quad_vertex_interior_indices.len() * std::mem::size_of::<u32>();
-        let interior_indices_offset = pos_buf_size;
-        let bvlb_data_size = mesh.b_vertex_loop_blinn_data.len() * std::mem::size_of::<BVertexLoopBlinnData>();
+        use std::mem::size_of;
+
+        let vertex_positions = mesh.iter().map(|x| x.b_quad_vertex_positions.len()).fold(0, |a, b| a + b);
+        let pos_buf_size = vertex_positions * size_of::<BQuadVertexPositions>();
+        let interior_indices = mesh.iter().map(|x| x.b_quad_vertex_interior_indices.len()).fold(0, |a, b| a + b);
+        let interior_ibuf_size = interior_indices * size_of::<u32>();
+        // println!("counter: {} {}", vertex_positions, interior_indices);
+        let interior_indices_offset = 0 + pos_buf_size;
+        let bvlb_data_size = mesh.iter().map(|x| x.b_vertex_loop_blinn_data.len()).fold(0, |a, b| a + b)
+            * size_of::<BVertexLoopBlinnData>();
         let bvlb_data_offset = interior_indices_offset + interior_ibuf_size;
-        let bvlb_pos_size = mesh.b_vertex_positions.len() * std::mem::size_of::<f32>() * 2;
+        let bvlb_pos_size = mesh.iter().map(|x| x.b_vertex_positions.len()).fold(0, |a, b| a + b) * size_of::<f32>() * 2;
         let bvlb_pos_offset = bvlb_data_offset + bvlb_data_size;
         let bvlb_indices_offset = bvlb_pos_offset + bvlb_pos_size;
         let mut bvlb_indices = Vec::new();
-        for bq in &mesh.b_quads
+        let mut bvlb_vertex_range_per_mesh = Vec::<Range<_>>::with_capacity(mesh.len());
+        let mut interior_vertex_range_per_mesh = Vec::<Range<_>>::with_capacity(mesh.len());
+        let mut bvlb_start = 0;
+        for m in &mesh
         {
-            // active curve(upper)
-            if bq.upper_control_point_vertex_index != 0xffff_ffff
+            let last_iv_end = interior_vertex_range_per_mesh.last().map(|x| x.end).unwrap_or(0);
+            let iv_range = last_iv_end .. last_iv_end + m.b_quad_vertex_interior_indices.len();
+            // println!("interior: {:?}", iv_range);
+            interior_vertex_range_per_mesh.push(iv_range);
+            let mut curve_index_count = 0;
+            for bq in &m.b_quads
             {
-                bvlb_indices.extend(vec![bq.upper_control_point_vertex_index, bq.upper_right_vertex_index, bq.upper_left_vertex_index]);
+                // active curve(upper)
+                if bq.upper_control_point_vertex_index != 0xffff_ffff
+                {
+                    bvlb_indices.extend(vec![bvlb_start + bq.upper_control_point_vertex_index,
+                        bvlb_start + bq.upper_right_vertex_index, bvlb_start + bq.upper_left_vertex_index]);
+                    curve_index_count += 3;
+                }
+                // active curve(lower)
+                if bq.lower_control_point_vertex_index != 0xffff_ffff
+                {
+                    bvlb_indices.extend(vec![bvlb_start + bq.lower_control_point_vertex_index,
+                        bvlb_start + bq.lower_right_vertex_index, bvlb_start + bq.lower_left_vertex_index]);
+                    curve_index_count += 3;
+                }
             }
-            // active curve(lower)
-            if bq.lower_control_point_vertex_index != 0xffff_ffff
-            {
-                bvlb_indices.extend(vec![bq.lower_control_point_vertex_index, bq.lower_right_vertex_index, bq.lower_left_vertex_index]);
-            }
+            // println!("bvlb: {} {}", m.b_vertex_loop_blinn_data.len(), m.b_vertex_positions.len());
+            let last_bv_end = bvlb_vertex_range_per_mesh.last().map(|x| x.end).unwrap_or(0);
+            let bv_range = last_bv_end .. last_bv_end + curve_index_count;
+            // println!("curve: {:?}", bv_range);
+            bvlb_vertex_range_per_mesh.push(bv_range);
+            bvlb_start += m.b_vertex_loop_blinn_data.len() as u32;
         }
-        let bvlb_vertices = bvlb_indices.len();
-        let bvlb_render_buffer_size = if bvlb_vertices == 0 { 0 }
-            else { bvlb_data_size + bvlb_pos_size + bvlb_vertices * std::mem::size_of::<u32>() };
+        let bvlb_render_buffer_size =
+            if bvlb_indices.is_empty() { 0 } else { bvlb_data_size + bvlb_pos_size + bvlb_indices.len() * size_of::<u32>() };
+        // println!("counter: {}", bvlb_indices.len());
+        let tf_offset = (bvlb_data_offset + bvlb_render_buffer_size) + 255 & !255;
+        let tf_size = transforms.as_ref().map_or(0, |t| t.len() * size_of::<GlyphTransform>());
 
-        let bufsize = pos_buf_size + interior_ibuf_size + bvlb_render_buffer_size;
-        let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer().transfer_dest()).create(&f.device)?;
+        let bufsize = tf_offset + tf_size;
+        let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer().uniform_texel_buffer().transfer_dest()).create(&f.device)?;
         let breq = buf.requirements();
         let mem = fe::DeviceMemory::allocate(&f.device, breq.size as _, f.device_memindex)?;
         buf.bind(&mem, 0)?;
@@ -164,16 +206,38 @@ impl PathfinderRenderBuffers
         unsafe
         {
             let mapped = umem.map(0 .. bufsize)?;
-            mapped.slice_mut(0, mesh.b_quad_vertex_positions.len()).clone_from_slice(&mesh.b_quad_vertex_positions);
-            mapped.slice_mut(interior_indices_offset, mesh.b_quad_vertex_interior_indices.len())
-                .clone_from_slice(&mesh.b_quad_vertex_interior_indices);
-            if bvlb_vertices > 0
+            let (mut vp_offs, mut ii_offs, mut cd_offs, mut cp_offs) = (0, 0, 0, 0);
+            for m in &mesh
             {
-                mapped.slice_mut(bvlb_data_offset, mesh.b_vertex_loop_blinn_data.len())
-                    .clone_from_slice(&mesh.b_vertex_loop_blinn_data);
-                mapped.slice_mut(bvlb_pos_offset, mesh.b_vertex_positions.len()).clone_from_slice(&mesh.b_vertex_positions);
-                mapped.slice_mut(bvlb_indices_offset, bvlb_vertices).clone_from_slice(&bvlb_indices);
+                // println!("Copying Position: {}({}) ..> {}", vp_offs * size_of::<BQuadVertexPositions>(), vp_offs, m.b_quad_vertex_positions.len());
+                mapped.slice_mut(vp_offs * size_of::<BQuadVertexPositions>(), m.b_quad_vertex_positions.len())
+                    .clone_from_slice(&m.b_quad_vertex_positions);
+                // println!("Copying Interior Indices: {}({}) ..> {} (+{})", ii_offs * size_of::<u32>(), ii_offs, m.b_quad_vertex_interior_indices.len(), vp_offs);
+                // println!("{:?} {:?}", &m.b_quad_vertex_interior_indices[..6],
+                //     &m.b_quad_vertex_interior_indices[m.b_quad_vertex_interior_indices.len() - 6..]);
+                let s = mapped.slice_mut(ii_offs * size_of::<u32>() + interior_indices_offset, m.b_quad_vertex_interior_indices.len());
+                for (s, d) in m.b_quad_vertex_interior_indices.iter().zip(s.iter_mut())
+                {
+                    // println!("Writing {}", s + vp_offs as u32);
+                    *d = s + 6 * vp_offs as u32;
+                }
+                if !bvlb_indices.is_empty()
+                {
+                    mapped.slice_mut(cd_offs * size_of::<BVertexLoopBlinnData>() + bvlb_data_offset, m.b_vertex_loop_blinn_data.len())
+                        .clone_from_slice(&m.b_vertex_loop_blinn_data);
+                    mapped.slice_mut(cp_offs * size_of::<f32>() * 2 + bvlb_pos_offset, m.b_vertex_positions.len())
+                        .clone_from_slice(&m.b_vertex_positions);
+                    cd_offs += m.b_vertex_loop_blinn_data.len();
+                    cp_offs += m.b_vertex_positions.len();
+                }
+                vp_offs += m.b_quad_vertex_positions.len();
+                ii_offs += m.b_quad_vertex_interior_indices.len();
             }
+            if !bvlb_indices.is_empty()
+            {
+                mapped.slice_mut(bvlb_indices_offset, bvlb_indices.len()).clone_from_slice(&bvlb_indices);
+            }
+            if let Some(ref ts) = transforms { mapped.slice_mut(tf_offset, ts.len()).clone_from_slice(ts); }
         }
         unsafe { umem.unmap(); }
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
@@ -192,14 +256,55 @@ impl PathfinderRenderBuffers
         f.queue.submit(&[fe::SubmissionBatch
         {
             command_buffers: Cow::Borrowed(&init_commands), .. Default::default()
-        }], None)?; f.queue.wait()?;
+        }], None)?;
+        
+        let transform_set = if let Some(_) = transforms
+        {
+            let descpool = fe::DescriptorPool::new(&f.device, 1,
+                &[fe::DescriptorPoolSize(fe::DescriptorType::UniformTexelBuffer, 1)], false)?;
+            let utb_set = descpool.alloc(&[utb_desc_layout])?.remove(0);
+            let v = buf.create_view(fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT, tf_offset as _ .. (tf_offset + tf_size) as _)?;
+            f.device.update_descriptor_sets(&[
+                fe::DescriptorSetWriteInfo(utb_set, 0, 0, fe::DescriptorUpdateInfo::UniformTexelBuffer(vec![v.native_ptr()]))
+            ], &[]);
+            Some((utb_set, v, descpool))
+        }
+        else { None };
 
+        f.device.wait()?;
         return Ok(PathfinderRenderBuffers
         {
-            buf, mem, interior_indices_offset,
-            drawn_vertices: mesh.b_quad_vertex_interior_indices.len(),
-            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, bvlb_vertices
+            buf, mem, interior_indices_offset, interior_vertex_range_per_mesh, bvlb_vertex_range_per_mesh,
+            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, transform_set
         })
+    }
+    fn populate_direct_render_commands_for(&self, rec: &mut fe::CmdRecord, size: &fe::Extent2D, res: &Resources)
+        -> fe::Result<()>
+    {
+        use std::mem::size_of;
+
+        rec .bind_graphics_pipeline_pair(&res.gp_simple_fill, &res.pl)
+            .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[size.0 as f32, size.1 as _])
+            .bind_vertex_buffers(0, &[(&self.buf, 0)]);
+        if let Some((s, _, _)) = self.transform_set { rec.bind_graphics_descriptor_sets(0, &[s], &[]); }
+        for (i, vcount) in self.interior_vertex_range_per_mesh.iter().enumerate().map(|(a, b)| (a as i32, b))
+        {
+            rec.bind_index_buffer(&self.buf, self.interior_indices_offset + vcount.start * size_of::<u32>(), fe::IndexType::U32);
+            rec.push_graphics_constant(fe::ShaderStage::VERTEX, PF_DIRECT_RENDER_GLYPH_INDEX_OFFSET, &i);
+            rec.draw_indexed(vcount.len() as _, 1, 0, 0, 0);
+        }
+        if !self.bvlb_vertex_range_per_mesh.is_empty()
+        {
+            rec.bind_graphics_pipeline(&res.gp_curve_fill)
+                .bind_vertex_buffers(0, &[(&self.buf, self.bvlb_pos_offset), (&self.buf, self.bvlb_data_offset)]);
+            for (i, vcount) in self.bvlb_vertex_range_per_mesh.iter().enumerate().map(|(a, b)| (a as i32, b))
+            {
+                rec.bind_index_buffer(&self.buf, self.bvlb_indices_offset + vcount.start * size_of::<u32>(), fe::IndexType::U32);
+                rec.push_graphics_constant(fe::ShaderStage::VERTEX, PF_DIRECT_RENDER_GLYPH_INDEX_OFFSET, &i);
+                rec.draw_indexed(vcount.len() as _, 1, 0, 0, 0);
+            }
+        }
+        return Ok(());
     }
 }
 impl EventDelegate for App
@@ -296,7 +401,8 @@ struct Resources
 {
     /*buf: fe::Buffer, _dmem: fe::DeviceMemory,*/
     gp_curve_fill: fe::Pipeline, gp_simple_fill: fe::Pipeline,
-    pf_bufs: PathfinderRenderBuffers, pl: fe::PipelineLayout, rp: fe::RenderPass, shaders: ShaderStore
+    pf_bufs: PathfinderRenderBuffers, pl: fe::PipelineLayout, rp: fe::RenderPass,
+    #[allow(dead_code)] shaders: ShaderStore, #[allow(dead_code)] utb_desc_layout: fe::DescriptorSetLayout
 }
 impl Resources
 {
@@ -336,7 +442,7 @@ impl Resources
         // glyph indices -> layouted text outlines
         let mut paths = Vec::new();
         let (mut left_offs, mut max_height) = (0.0, 0.0f32);
-        for g in glyphs
+        for &g in &glyphs
         {
             let mut g = GlyphKey::new(g as _, SubpixelOffset(0));
             let dim = fc.glyph_dimensions(&font, &g, true).unwrap();
@@ -345,8 +451,8 @@ impl Resources
             g.subpixel_offset.0 = (rendered.fract() * SUBPIXEL_GRANULARITY as f32) as _;
             if let Ok(outline) = fc.glyph_outline(&font, &g)
             {
-                paths.extend(Transform2DPathIter::new(outline.iter(),
-                    &Transform2D::create_translation(rendered.trunc() as _, 0.0)));
+                paths.push(Transform2DPathIter::new(outline.iter(),
+                    &Transform2D::create_translation(rendered.trunc() as _, 0.0)).collect::<Vec<_>>());
             }
             left_offs += dim.advance/* * 60.0*/;
             max_height = max_height.max(dim.size.height as f32/* as i32 as f32 / 96.0*/);
@@ -365,19 +471,41 @@ impl Resources
         println!("left offset: {}", left_offs);
         println!("max height: {}", max_height);
         // text outlines -> pathfinder mesh
-        let mut partitioner = Partitioner::new();
-        for pe in Transform2DPathIter::new(paths.iter().cloned(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
+        let mut meshes = Vec::with_capacity(paths.len());
+        for p in paths
         {
-            partitioner.builder_mut().path_event(pe);
+            let mut partitioner = Partitioner::new();
+            for pe in Transform2DPathIter::new(p.into_iter(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
+            {
+                partitioner.builder_mut().path_event(pe);
+            }
+            partitioner.partition(FillRule::Winding);
+            partitioner.builder_mut().build_and_reset();
+            meshes.push(partitioner.into_mesh());
         }
-        partitioner.partition(FillRule::Winding);
-        partitioner.builder_mut().build_and_reset();
-        partitioner.mesh_mut().push_stencil_segments(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
-        partitioner.mesh_mut().push_stencil_normals(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
-        let pf_bufs = PathfinderRenderBuffers::new(&f, partitioner.mesh())?;
+        // partitioner.mesh_mut().push_stencil_segments(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
+        // partitioner.mesh_mut().push_stencil_normals(CubicToQuadraticTransformer::new(paths.iter().cloned(), 5.0));
+
+        let pixels_per_unit = fc.pixels_per_unit(&font).unwrap();
+        let mut stem_darkening_offset = embolden_amount(font.size.to_f32_px(), pixels_per_unit);
+        stem_darkening_offset[0] *= pixels_per_unit / 2.0f32.sqrt();
+        stem_darkening_offset[1] *= pixels_per_unit / 2.0f32.sqrt();
+        // println!("stem darkening offset: {:?}", stem_darkening_offset);
+        let transforms = glyphs.iter().map(|_| GlyphTransform
+        {
+            st: [1.0, 1.0, stem_darkening_offset[0], stem_darkening_offset[1]],
+            ext: [0.0; 2], pad: [0.0; 2]
+        }).collect::<Vec<_>>();
+        println!("transform: {:?}", transforms);
+
+        let utb_desc_layout = fe::DescriptorSetLayout::new(&f.device, &fe::DSLBindings
+        {
+            uniform_texel_buffer: Some((0, 1, fe::ShaderStage::VERTEX)), .. fe::DSLBindings::empty()
+        })?;
 
         let shaders = ShaderStore::load(&f.device).unwrap();
-        let pl = fe::PipelineLayout::new(&f.device, &[], &[(fe::ShaderStage::VERTEX, 0 .. 8)])?;
+        let pl = fe::PipelineLayout::new(&f.device, &[&utb_desc_layout], PF_DIRECT_RENDER_PUSH_CONSTANT_LAYOUT)?;
+        let pf_bufs = PathfinderRenderBuffers::new(&f, &utb_desc_layout, meshes, Some(transforms))?;
 
         let (gp_simple_fill, gp_curve_fill);
         {
@@ -401,10 +529,13 @@ impl Resources
             gp_curve_fill = gpb.create(&f.device, None)?;
         }
 
-        return Ok(Resources { pf_bufs, gp_curve_fill, gp_simple_fill, pl, rp, shaders })
+        return Ok(Resources { pf_bufs, gp_curve_fill, gp_simple_fill, pl, rp, shaders, utb_desc_layout })
     }
 }
-pub struct RenderCommands(Vec<fe::CommandBuffer>);
+pub struct RenderCommands
+{
+    swapchain: Vec<fe::CommandBuffer>, #[allow(dead_code)] pathfinder_direct_render: Vec<fe::CommandBuffer>
+}
 impl App
 {
     fn ferrite_ref(&self) -> Ref<Ferrite> { Ref::map(self.ferrite.borrow(), |f| f.as_ref().unwrap()) }
@@ -440,34 +571,30 @@ impl App
             extent: fe::vk::VkExtent2D { width: vp.width as _, height: vp.height as _ }
         };
 
+        f.cmdpool.reset(true)?;
+        let pf_drc = f.cmdpool.alloc(rtvs.framebuffers.len() as _, false)?;
         let render_commands = f.cmdpool.alloc(rtvs.framebuffers.len() as _, true)?;
-        for (c, fb) in render_commands.iter().zip(&rtvs.framebuffers)
+        for (drc, (c, fb)) in pf_drc.iter().zip(render_commands.iter().zip(&rtvs.framebuffers))
         {
-            let mut rec = c.begin()?;
-            rec.begin_render_pass(&r.rp, fb, fe::vk::VkRect2D
             {
-                offset: fe::vk::VkOffset2D { x: 0, y: 0 },
-                extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
-            }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], true)
-                .bind_graphics_pipeline_pair(&r.gp_simple_fill, &r.pl)
-                .set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()])
-                .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[rtvs.size.0 as f32, rtvs.size.1 as _])
-                .bind_vertex_buffers(0, &[(&r.pf_bufs.buf, 0)])
-                .bind_index_buffer(&r.pf_bufs.buf, r.pf_bufs.interior_indices_offset, fe::IndexType::U32)
-                .draw_indexed(r.pf_bufs.drawn_vertices as _, 1, 0, 0, 0);
-            if r.pf_bufs.bvlb_vertices > 0
-            {
-                rec.bind_graphics_pipeline(&r.gp_curve_fill)
-                    .bind_vertex_buffers(0, &[
-                        (&r.pf_bufs.buf, r.pf_bufs.bvlb_pos_offset),
-                        (&r.pf_bufs.buf, r.pf_bufs.bvlb_data_offset)
-                    ])
-                    .bind_index_buffer(&r.pf_bufs.buf, r.pf_bufs.bvlb_indices_offset, fe::IndexType::U32)
-                    .draw_indexed(r.pf_bufs.bvlb_vertices as _, 1, 0, 0, 0);
+                let mut drr = drc.begin_inherit(Some((fb, &r.rp, 0)), None)?;
+                drr.set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()]);
+                r.pf_bufs.populate_direct_render_commands_for(&mut drr, fb.size(), &r)?;
             }
-            rec.end_render_pass();
+            let mut rec = c.begin()?;
+            // rec.set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()]);
+            unsafe
+            {
+                rec.begin_render_pass(&r.rp, fb, fe::vk::VkRect2D
+                {
+                    offset: fe::vk::VkOffset2D { x: 0, y: 0 },
+                    extent: fe::vk::VkExtent2D { width: rtvs.size.0, height: rtvs.size.1 }
+                }, &[fe::ClearValue::Color([0.0, 0.0, 0.0, 1.0])], false)
+                    .execute_commands(&[drc.native_ptr()]);
+                rec.end_render_pass();
+            }
         }
-        Ok(RenderCommands(render_commands))
+        Ok(RenderCommands { swapchain: render_commands, pathfinder_direct_render: pf_drc })
     }
     fn render(&self) -> fe::Result<()>
     {
@@ -479,7 +606,7 @@ impl App
             as usize;
         f.queue.submit(&[fe::SubmissionBatch
         {
-            command_buffers: Cow::Borrowed(&rcmds.0[next..next+1]),
+            command_buffers: Cow::Borrowed(&rcmds.swapchain[next..next+1]),
             wait_semaphores: Cow::Borrowed(&[(&f.semaphore_sync_next, fe::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)]),
             signal_semaphores: Cow::Borrowed(&[&f.semaphore_command_completion])
         }], Some(&f.fence_command_completion))?;
@@ -580,6 +707,27 @@ impl ImageMemoryPair
 
 fn main() { std::process::exit(GUIApplication::run(App::new())); }
 
+fn compute_stem_darkening_amount(pixels_per_em: f32, pixels_per_unit: f32) -> [f32; 2]
+{
+    const LIMIT_SIZE: f32 = 72.0;
+    let amounts: [f32; 2] = [0.0121 * 2.0f32.sqrt(), 0.0121 * 1.25 * 2.0f32.sqrt()];
+
+    if pixels_per_em <= LIMIT_SIZE
+    {
+        let scaled_amount = |a| f32::min(a * pixels_per_em, LIMIT_SIZE) / pixels_per_unit;
+        [scaled_amount(amounts[0]), scaled_amount(amounts[1])]
+    }
+    else { [0.0; 2] }
+}
+#[cfg(feature = "StemDarkening")]
+fn stem_darkening_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2]
+{
+    compute_stem_darkening_amount(font_size, pixels_per_unit)
+}
+#[cfg(not(feature = "StemDarkening"))]
+fn stem_darkening_amount(_font_size: f32, _pixels_per_unit: f32) -> [f32; 2] { [0.0; 2] }
+fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_darkening_amount(font_size, pixels_per_unit) }
+
 #[cfg(target_os = "macos")] #[macro_use] extern crate objc;
 #[cfg(target_os = "macos")] extern crate core_graphics;
 #[cfg(target_os = "macos")] extern crate core_text;
@@ -601,17 +749,17 @@ fn main() { std::process::exit(GUIApplication::run(App::new())); }
 {
     use core_graphics::font::CGFont;
     use foreign_types_shared::ForeignType;
-    use libc::{c_void, c_long, c_char}; use std::ptr::null_mut;
+    use libc::{c_void, /*c_long, c_char*/}; use std::ptr::null_mut;
     extern "system"
     {
         fn CTFontCopyGraphicsFont(font: *mut c_void, attributes: *mut c_void) -> *mut c_void;
-        fn CTFontCopySupportedLanguages(font: *mut c_void) -> *mut c_void;
+        /*fn CTFontCopySupportedLanguages(font: *mut c_void) -> *mut c_void;
         fn CFArrayGetCount(array: *const c_void) -> c_long;
         fn CFArrayGetValueAtIndex(array: *const c_void, index: c_long) -> *const c_void;
         fn CFStringGetCStringPtr(string: *const c_void, encoding: u32) -> *const c_char;
-        fn CFStringGetCString(string: *const c_void, buf: *mut c_char, bufferSize: c_long, encoding: u32) -> bool;
+        fn CFStringGetCString(string: *const c_void, buf: *mut c_char, bufferSize: c_long, encoding: u32) -> bool; */
     }
-    const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+    // const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 
     // システムフォント(San Francisco/Helvetica Neue)は日本語に対応していない
     // そのうちフォールバック機能をfont-rendererにつける必要がある
