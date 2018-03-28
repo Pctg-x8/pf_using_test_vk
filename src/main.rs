@@ -548,12 +548,14 @@ impl Resources
 
         let pixels_per_unit = fc.pixels_per_unit(&font).unwrap();
         let mut stem_darkening_offset = embolden_amount(font.size.to_f32_px(), pixels_per_unit);
+        let ascent = fc.ascent(&font).unwrap() as f32;
+        let sd_yscale = (ascent + stem_darkening_offset[1]) / ascent;
         stem_darkening_offset[0] *= pixels_per_unit / 2.0f32.sqrt();
-        stem_darkening_offset[1] *= pixels_per_unit / 2.0f32.sqrt();
+        stem_darkening_offset[1] *= sd_yscale * pixels_per_unit / 2.0f32.sqrt();
         // println!("stem darkening offset: {:?}", stem_darkening_offset);
         let transforms = glyphs.iter().map(|_| GlyphTransform
         {
-            st: [1.0, 1.0, stem_darkening_offset[0], stem_darkening_offset[1]], ext: [0.0; 2], pad: [0.0; 2]
+            st: [1.0, sd_yscale, stem_darkening_offset[0], stem_darkening_offset[1]], ext: [0.0; 2], pad: [0.0; 2]
         }).collect::<Vec<_>>();
         // println!("transform: {:?}", transforms);
 
@@ -823,11 +825,14 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
 
     // システムフォント(San Francisco/Helvetica Neue)は日本語に対応していない
     // そのうちフォールバック機能をfont-rendererにつける必要がある
-    let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W4\0".as_ptr()] };
+    let nsfont = appkit::NSFont::with_name("ヒラギノ角ゴシック W4", 0.0).unwrap();
+    let point_size = nsfont.point_size();
+    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont.leave_id(), null_mut()) as *mut _) };
+    /*let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W4\0".as_ptr()] };
     let nsfont: *mut Object = unsafe { msg_send![Class::get("NSFont").unwrap(), fontWithName: fontname size: CGFloat(0.0)] };
     let _: () = unsafe { msg_send![fontname, release] };
     let point_size: CGFloat = unsafe { msg_send![nsfont, pointSize] };
-    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont as *mut _, null_mut()) as *mut _) };
+    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont as *mut _, null_mut()) as *mut _) };*/
     /*let languages = unsafe { CTFontCopySupportedLanguages(nsfont as *mut _) };
     for n in 0 .. unsafe { CFArrayGetCount(languages) }
     {
