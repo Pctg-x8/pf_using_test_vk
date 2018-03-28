@@ -115,6 +115,30 @@ use pathfinder_partitioner::mesh::Mesh;
 use pathfinder_partitioner::BQuadVertexPositions;
 use std::ops::Range;
 #[repr(C)] #[derive(Clone, Debug)]
+pub struct Hint { x_height: f32, hinted_x_height: f32, stem_height: f32, hinted_stem_height: f32 }
+impl Hint
+{
+    fn compute(fc: &mut FontContext<usize>, instance: &FontInstance<usize>, use_hinting: bool) -> Self
+    {
+        let ppu = fc.pixels_per_unit(instance).unwrap();
+        let x_height = fc.x_height(instance).unwrap() as f32;
+        let stem_height = fc.cap_height(instance).unwrap() as f32;
+        let (hinted_x_height, hinted_stem_height);
+        if use_hinting
+        {
+            hinted_x_height = x_height;
+            hinted_stem_height = stem_height;
+        }
+        else
+        {
+            hinted_x_height = f32::round(f32::round(x_height as f32 * ppu) / ppu);
+            hinted_stem_height = f32::round(f32::round(stem_height as f32 * ppu) / ppu);
+        }
+
+        Hint { x_height, stem_height, hinted_x_height, hinted_stem_height }
+    }
+}
+#[repr(C)] #[derive(Clone, Debug)]
 pub struct GlyphTransform { st: [f32; 4], ext: [f32; 2], pad: [f32; 2] }
 /*
 Buffer:
@@ -123,11 +147,14 @@ Buffer:
 [[Loop-Blinn Curve Data(Vertex Buffer)]]      - bvlb_data_offset..
 [[Loop-Blinn Curve Positions(Vertex Buffer)]] - bvlb_pos_offset..
 [[Loop-Blinn Curve Indices(Index Buffer)]]    - bvlb_indices_offset..
+[[Hint Constant(Uniform Buffer)]]
+[[Glyph Transform Constants(Uniform Texel Buffer)]]
 */
+#[allow(dead_code)]
 pub struct PathfinderRenderBuffers
 {
-    buf: fe::Buffer, #[allow(dead_code)] mem: fe::DeviceMemory,
-    transform_set: Option<(fe::vk::VkDescriptorSet, fe::BufferView, fe::DescriptorPool)>,
+    buf: fe::Buffer, mem: fe::DeviceMemory,
+    descset: fe::vk::VkDescriptorSet, transforms_view: fe::BufferView, descpool: fe::DescriptorPool,
     interior_indices_offset: usize, interior_vertex_range_per_mesh: Vec<Range<usize>>,
     // bvlb: b-vertex(loop-blinn), Quadratic Bezier描画用データ
     bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize,
@@ -136,7 +163,7 @@ pub struct PathfinderRenderBuffers
 impl PathfinderRenderBuffers
 {
     pub fn new(f: &Ferrite, utb_desc_layout: &fe::DescriptorSetLayout,
-        mesh: Vec<Mesh>, transforms: Option<Vec<GlyphTransform>>) -> fe::Result<Self>
+        mesh: Vec<Mesh>, transforms: Vec<GlyphTransform>, hint: Hint) -> fe::Result<Self>
     {
         use std::mem::size_of;
 
@@ -190,11 +217,13 @@ impl PathfinderRenderBuffers
         let bvlb_render_buffer_size =
             if bvlb_indices.is_empty() { 0 } else { bvlb_data_size + bvlb_pos_size + bvlb_indices.len() * size_of::<u32>() };
         // println!("counter: {}", bvlb_indices.len());
-        let tf_offset = (bvlb_data_offset + bvlb_render_buffer_size) + 255 & !255;
-        let tf_size = transforms.as_ref().map_or(0, |t| t.len() * size_of::<GlyphTransform>());
+        let hint_const_offset = (bvlb_data_offset + bvlb_render_buffer_size) + 255 & !255;
+        let tf_offset = (hint_const_offset + size_of::<Hint>()) + 255 & !255;
+        let tf_size = transforms.len() * size_of::<GlyphTransform>();
 
         let bufsize = tf_offset + tf_size;
-        let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer().uniform_texel_buffer().transfer_dest()).create(&f.device)?;
+        let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer()
+            .uniform_texel_buffer().uniform_buffer().transfer_dest()).create(&f.device)?;
         let breq = buf.requirements();
         let mem = fe::DeviceMemory::allocate(&f.device, breq.size as _, f.device_memindex)?;
         buf.bind(&mem, 0)?;
@@ -237,7 +266,8 @@ impl PathfinderRenderBuffers
             {
                 mapped.slice_mut(bvlb_indices_offset, bvlb_indices.len()).clone_from_slice(&bvlb_indices);
             }
-            if let Some(ref ts) = transforms { mapped.slice_mut(tf_offset, ts.len()).clone_from_slice(ts); }
+            *mapped.get_mut(hint_const_offset) = hint;
+            mapped.slice_mut(tf_offset, transforms.len()).clone_from_slice(&transforms);
         }
         unsafe { umem.unmap(); }
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
@@ -258,24 +288,25 @@ impl PathfinderRenderBuffers
             command_buffers: Cow::Borrowed(&init_commands), .. Default::default()
         }], None)?;
         
-        let transform_set = if let Some(_) = transforms
-        {
-            let descpool = fe::DescriptorPool::new(&f.device, 1,
-                &[fe::DescriptorPoolSize(fe::DescriptorType::UniformTexelBuffer, 1)], false)?;
-            let utb_set = descpool.alloc(&[utb_desc_layout])?.remove(0);
-            let v = buf.create_view(fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT, tf_offset as _ .. (tf_offset + tf_size) as _)?;
-            f.device.update_descriptor_sets(&[
-                fe::DescriptorSetWriteInfo(utb_set, 0, 0, fe::DescriptorUpdateInfo::UniformTexelBuffer(vec![v.native_ptr()]))
-            ], &[]);
-            Some((utb_set, v, descpool))
-        }
-        else { None };
+        let descpool = fe::DescriptorPool::new(&f.device, 1, &[
+            fe::DescriptorPoolSize(fe::DescriptorType::UniformTexelBuffer, 1),
+            fe::DescriptorPoolSize(fe::DescriptorType::UniformBuffer, 1)
+        ], false)?;
+        let descset = descpool.alloc(&[utb_desc_layout])?.remove(0);
+        let transforms_view =
+            buf.create_view(fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT, tf_offset as _ .. (tf_offset + tf_size) as _)?;
+        f.device.update_descriptor_sets(&[
+            fe::DescriptorSetWriteInfo(descset, 0, 0,
+                fe::DescriptorUpdateInfo::UniformTexelBuffer(vec![transforms_view.native_ptr()])),
+            fe::DescriptorSetWriteInfo(descset, 1, 0, fe::DescriptorUpdateInfo::UniformBuffer(
+                vec![(buf.native_ptr(), hint_const_offset .. hint_const_offset + size_of::<Hint>())]))
+        ], &[]);
 
         f.device.wait()?;
         return Ok(PathfinderRenderBuffers
         {
             buf, mem, interior_indices_offset, interior_vertex_range_per_mesh, bvlb_vertex_range_per_mesh,
-            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, transform_set
+            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, descpool, descset, transforms_view
         })
     }
     fn populate_direct_render_commands_for(&self, rec: &mut fe::CmdRecord, size: &fe::Extent2D, res: &Resources)
@@ -285,8 +316,8 @@ impl PathfinderRenderBuffers
 
         rec .bind_graphics_pipeline_pair(&res.gp_simple_fill, &res.pl)
             .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[size.0 as f32, size.1 as _])
-            .bind_vertex_buffers(0, &[(&self.buf, 0)]);
-        if let Some((s, _, _)) = self.transform_set { rec.bind_graphics_descriptor_sets(0, &[s], &[]); }
+            .bind_vertex_buffers(0, &[(&self.buf, 0)])
+            .bind_graphics_descriptor_sets(0, &[self.descset], &[]);
         for (i, vcount) in self.interior_vertex_range_per_mesh.iter().enumerate().map(|(a, b)| (a as i32, b))
         {
             rec.bind_index_buffer(&self.buf, self.interior_indices_offset + vcount.start * size_of::<u32>(), fe::IndexType::U32);
@@ -493,19 +524,21 @@ impl Resources
         // println!("stem darkening offset: {:?}", stem_darkening_offset);
         let transforms = glyphs.iter().map(|_| GlyphTransform
         {
-            st: [1.0, 1.0, stem_darkening_offset[0], stem_darkening_offset[1]],
-            ext: [0.0; 2], pad: [0.0; 2]
+            st: [1.0, 1.0, stem_darkening_offset[0], stem_darkening_offset[1]], ext: [0.0; 2], pad: [0.0; 2]
         }).collect::<Vec<_>>();
-        println!("transform: {:?}", transforms);
+        // println!("transform: {:?}", transforms);
 
         let utb_desc_layout = fe::DescriptorSetLayout::new(&f.device, &fe::DSLBindings
         {
-            uniform_texel_buffer: Some((0, 1, fe::ShaderStage::VERTEX)), .. fe::DSLBindings::empty()
+            uniform_texel_buffer:   Some((0, 1, fe::ShaderStage::VERTEX)),
+            uniform_buffer:         Some((1, 1, fe::ShaderStage::VERTEX)),
+            .. fe::DSLBindings::empty()
         })?;
 
         let shaders = ShaderStore::load(&f.device).unwrap();
         let pl = fe::PipelineLayout::new(&f.device, &[&utb_desc_layout], PF_DIRECT_RENDER_PUSH_CONSTANT_LAYOUT)?;
-        let pf_bufs = PathfinderRenderBuffers::new(&f, &utb_desc_layout, meshes, Some(transforms))?;
+        let pf_bufs = PathfinderRenderBuffers::new(&f, &utb_desc_layout, meshes, transforms,
+            Hint::compute(&mut fc, &font, true))?;
 
         let (gp_simple_fill, gp_curve_fill);
         {
@@ -710,7 +743,8 @@ fn main() { std::process::exit(GUIApplication::run(App::new())); }
 fn compute_stem_darkening_amount(pixels_per_em: f32, pixels_per_unit: f32) -> [f32; 2]
 {
     const LIMIT_SIZE: f32 = 72.0;
-    let amounts: [f32; 2] = [(0.0121 * 2.0f32.sqrt()) * (2.0 / screen_multiplier()), (0.0121 * 1.25 * 2.0f32.sqrt()) * (2.0 / screen_multiplier())];
+    let amounts: [f32; 2] = [(0.0121 * 2.0f32.sqrt()) * (2.0 / screen_multiplier()),
+        (0.0121 * 1.25 * 2.0f32.sqrt()) * (2.0 / screen_multiplier())];
 
     if pixels_per_em <= LIMIT_SIZE
     {
