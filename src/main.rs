@@ -447,6 +447,15 @@ impl EventDelegate for App
     }
 }
 
+macro_rules! DSLBindings {
+    [$($binding: tt : [$kind: ident @ $stage: path; $count: expr]),*] => {
+        fe::DSLBindings
+        {
+            $($kind: Some(($binding, $count, $stage)),)* ..fe::DSLBindings::empty()
+        }
+    }
+}
+
 struct Resources
 {
     /*buf: fe::Buffer, _dmem: fe::DeviceMemory,*/
@@ -548,12 +557,10 @@ impl Resources
         }).collect::<Vec<_>>();
         // println!("transform: {:?}", transforms);
 
-        let utb_desc_layout = fe::DescriptorSetLayout::new(&f.device, &fe::DSLBindings
-        {
-            uniform_texel_buffer:   Some((0, 1, fe::ShaderStage::VERTEX)),
-            uniform_buffer:         Some((1, 1, fe::ShaderStage::VERTEX)),
-            .. fe::DSLBindings::empty()
-        })?;
+        let utb_desc_layout = fe::DescriptorSetLayout::new(&f.device, &DSLBindings![
+            0: [uniform_texel_buffer @ fe::ShaderStage::VERTEX; 1],
+            1: [uniform_buffer @ fe::ShaderStage::VERTEX; 1]
+        ])?;
 
         let shaders = ShaderStore::load(&f.device).unwrap();
         let pl = fe::PipelineLayout::new(&f.device, &[&utb_desc_layout], PF_DIRECT_RENDER_PUSH_CONSTANT_LAYOUT)?;
