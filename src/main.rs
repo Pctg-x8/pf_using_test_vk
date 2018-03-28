@@ -140,6 +140,18 @@ impl Hint
 }
 #[repr(C)] #[derive(Clone, Debug)]
 pub struct GlyphTransform { st: [f32; 4], ext: [f32; 2], pad: [f32; 2] }
+
+pub struct BufferPrealloc { total: usize }
+impl BufferPrealloc
+{
+    pub fn new() -> Self { BufferPrealloc { total: 0 } }
+    pub fn alloc(&mut self, size: usize, align: usize) -> Range<usize>
+    {
+        let align = align.max(1);
+        let o = self.total + (align - 1) & !(align - 1);
+        self.total = o + size; return o .. self.total;
+    }
+}
 /*
 Buffer:
 [[Interior-Filling Positions(Vertex Buffer)]] - 0..
@@ -150,15 +162,14 @@ Buffer:
 [[Hint Constant(Uniform Buffer)]]
 [[Glyph Transform Constants(Uniform Texel Buffer)]]
 */
+struct CurveRenderDataRanges { data: Range<usize>, pos: Range<usize>, indices: Range<usize> }
 #[allow(dead_code)]
 pub struct PathfinderRenderBuffers
 {
     buf: fe::Buffer, mem: fe::DeviceMemory,
     descset: fe::vk::VkDescriptorSet, transforms_view: fe::BufferView, descpool: fe::DescriptorPool,
-    interior_indices_offset: usize, interior_vertex_range_per_mesh: Vec<Range<usize>>,
-    // bvlb: b-vertex(loop-blinn), Quadratic Bezier描画用データ
-    bvlb_data_offset: usize, bvlb_pos_offset: usize, bvlb_indices_offset: usize,
-    bvlb_vertex_range_per_mesh: Vec<Range<usize>>
+    interior_indices_range: Range<usize>, interior_pos_range: Range<usize>, interior_vertex_range_per_mesh: Vec<Range<usize>>,
+    curve_render_data_ranges: Option<CurveRenderDataRanges>, bvlb_vertex_range_per_mesh: Vec<Range<usize>>
 }
 impl PathfinderRenderBuffers
 {
@@ -167,21 +178,27 @@ impl PathfinderRenderBuffers
     {
         use std::mem::size_of;
 
-        let vertex_positions = mesh.iter().map(|x| x.b_quad_vertex_positions.len()).fold(0, |a, b| a + b);
+        let mut prealloc = BufferPrealloc::new();
+        let min_uniform_align = f.adapter.properties().limits.minUniformBufferOffsetAlignment as usize;
+        let hint_const_range = prealloc.alloc(size_of::<Hint>(), min_uniform_align);
+        let transforms_range = prealloc.alloc(size_of::<GlyphTransform>() * transforms.len(), min_uniform_align);
+        let interior_pos_range = prealloc.alloc(mesh.iter().fold(0, |a, x| a + x.b_quad_vertex_positions.len()) * size_of::<BQuadVertexPositions>(), 1);
+        let interior_indices_range = prealloc.alloc(mesh.iter().fold(0, |a, x| a + x.b_quad_vertex_interior_indices.len()) * size_of::<u32>(), 1);
+        /*let vertex_positions = mesh.iter().map(|x| x.b_quad_vertex_positions.len()).fold(0, |a, b| a + b);
         let pos_buf_size = vertex_positions * size_of::<BQuadVertexPositions>();
         let interior_indices = mesh.iter().map(|x| x.b_quad_vertex_interior_indices.len()).fold(0, |a, b| a + b);
-        let interior_ibuf_size = interior_indices * size_of::<u32>();
+        let interior_ibuf_size = interior_indices * size_of::<u32>();*/
         // println!("counter: {} {}", vertex_positions, interior_indices);
-        let interior_indices_offset = 0 + pos_buf_size;
-        let bvlb_data_size = mesh.iter().map(|x| x.b_vertex_loop_blinn_data.len()).fold(0, |a, b| a + b)
+        // let interior_indices_offset = 0 + pos_buf_size;
+        /*let bvlb_data_size = mesh.iter().map(|x| x.b_vertex_loop_blinn_data.len()).fold(0, |a, b| a + b)
             * size_of::<BVertexLoopBlinnData>();
         let bvlb_data_offset = interior_indices_offset + interior_ibuf_size;
         let bvlb_pos_size = mesh.iter().map(|x| x.b_vertex_positions.len()).fold(0, |a, b| a + b) * size_of::<f32>() * 2;
         let bvlb_pos_offset = bvlb_data_offset + bvlb_data_size;
-        let bvlb_indices_offset = bvlb_pos_offset + bvlb_pos_size;
+        let bvlb_indices_offset = bvlb_pos_offset + bvlb_pos_size;*/
         let mut bvlb_indices = Vec::new();
-        let mut bvlb_vertex_range_per_mesh = Vec::<Range<_>>::with_capacity(mesh.len());
-        let mut interior_vertex_range_per_mesh = Vec::<Range<_>>::with_capacity(mesh.len());
+        let mut bvlb_vertex_range_per_mesh: Vec<Range<usize>> = Vec::with_capacity(mesh.len());
+        let mut interior_vertex_range_per_mesh: Vec<Range<usize>> = Vec::with_capacity(mesh.len());
         let mut bvlb_start = 0;
         for m in &mesh
         {
@@ -214,47 +231,48 @@ impl PathfinderRenderBuffers
             bvlb_vertex_range_per_mesh.push(bv_range);
             bvlb_start += m.b_vertex_loop_blinn_data.len() as u32;
         }
-        let bvlb_render_buffer_size =
-            if bvlb_indices.is_empty() { 0 } else { bvlb_data_size + bvlb_pos_size + bvlb_indices.len() * size_of::<u32>() };
-        // println!("counter: {}", bvlb_indices.len());
-        let hint_const_offset = (bvlb_data_offset + bvlb_render_buffer_size) + 255 & !255;
-        let tf_offset = (hint_const_offset + size_of::<Hint>()) + 255 & !255;
-        let tf_size = transforms.len() * size_of::<GlyphTransform>();
+        let curve_render_data_ranges = if bvlb_indices.is_empty() { None } else
+        {
+            let data = prealloc.alloc(mesh.iter().fold(0, |a, x| a + x.b_vertex_loop_blinn_data.len()) * size_of::<BVertexLoopBlinnData>(), 1);
+            let pos = prealloc.alloc(mesh.iter().fold(0, |a, x| a + x.b_vertex_positions.len()) * size_of::<f32>() * 2, 1);
+            let indices = prealloc.alloc(bvlb_indices.len() * size_of::<u32>(), 1);
+            Some(CurveRenderDataRanges { data, pos, indices })
+        };
 
-        let bufsize = tf_offset + tf_size;
-        let buf = fe::BufferDesc::new(bufsize, fe::BufferUsage::VERTEX_BUFFER.index_buffer()
+        println!("Allocating DeviceMemory: {} bytes", prealloc.total);
+        let buf = fe::BufferDesc::new(prealloc.total, fe::BufferUsage::VERTEX_BUFFER.index_buffer()
             .uniform_texel_buffer().uniform_buffer().transfer_dest()).create(&f.device)?;
         let breq = buf.requirements();
         let mem = fe::DeviceMemory::allocate(&f.device, breq.size as _, f.device_memindex)?;
         buf.bind(&mem, 0)?;
         
-        let ubuf = fe::BufferDesc::new(bufsize, fe::BufferUsage::TRANSFER_SRC).create(&f.device)?;
+        let ubuf = fe::BufferDesc::new(prealloc.total, fe::BufferUsage::TRANSFER_SRC).create(&f.device)?;
         let ubreq = ubuf.requirements();
         let umem = fe::DeviceMemory::allocate(&f.device, ubreq.size as _, f.upload_memindex)?;
         ubuf.bind(&umem, 0)?;
         unsafe
         {
-            let mapped = umem.map(0 .. bufsize)?;
+            let mapped = umem.map(0 .. prealloc.total)?;
             let (mut vp_offs, mut ii_offs, mut cd_offs, mut cp_offs) = (0, 0, 0, 0);
             for m in &mesh
             {
                 // println!("Copying Position: {}({}) ..> {}", vp_offs * size_of::<BQuadVertexPositions>(), vp_offs, m.b_quad_vertex_positions.len());
-                mapped.slice_mut(vp_offs * size_of::<BQuadVertexPositions>(), m.b_quad_vertex_positions.len())
+                mapped.slice_mut(vp_offs * size_of::<BQuadVertexPositions>() + interior_pos_range.start, m.b_quad_vertex_positions.len())
                     .clone_from_slice(&m.b_quad_vertex_positions);
                 // println!("Copying Interior Indices: {}({}) ..> {} (+{})", ii_offs * size_of::<u32>(), ii_offs, m.b_quad_vertex_interior_indices.len(), vp_offs);
                 // println!("{:?} {:?}", &m.b_quad_vertex_interior_indices[..6],
                 //     &m.b_quad_vertex_interior_indices[m.b_quad_vertex_interior_indices.len() - 6..]);
-                let s = mapped.slice_mut(ii_offs * size_of::<u32>() + interior_indices_offset, m.b_quad_vertex_interior_indices.len());
+                let s = mapped.slice_mut(ii_offs * size_of::<u32>() + interior_indices_range.start, m.b_quad_vertex_interior_indices.len());
                 for (s, d) in m.b_quad_vertex_interior_indices.iter().zip(s.iter_mut())
                 {
                     // println!("Writing {}", s + vp_offs as u32);
                     *d = s + 6 * vp_offs as u32;
                 }
-                if !bvlb_indices.is_empty()
+                if let Some(ref dr) = curve_render_data_ranges
                 {
-                    mapped.slice_mut(cd_offs * size_of::<BVertexLoopBlinnData>() + bvlb_data_offset, m.b_vertex_loop_blinn_data.len())
+                    mapped.slice_mut(cd_offs * size_of::<BVertexLoopBlinnData>() + dr.data.start, m.b_vertex_loop_blinn_data.len())
                         .clone_from_slice(&m.b_vertex_loop_blinn_data);
-                    mapped.slice_mut(cp_offs * size_of::<f32>() * 2 + bvlb_pos_offset, m.b_vertex_positions.len())
+                    mapped.slice_mut(cp_offs * size_of::<f32>() * 2 + dr.pos.start, m.b_vertex_positions.len())
                         .clone_from_slice(&m.b_vertex_positions);
                     cd_offs += m.b_vertex_loop_blinn_data.len();
                     cp_offs += m.b_vertex_positions.len();
@@ -262,25 +280,25 @@ impl PathfinderRenderBuffers
                 vp_offs += m.b_quad_vertex_positions.len();
                 ii_offs += m.b_quad_vertex_interior_indices.len();
             }
-            if !bvlb_indices.is_empty()
+            if let Some(ref dr) = curve_render_data_ranges
             {
-                mapped.slice_mut(bvlb_indices_offset, bvlb_indices.len()).clone_from_slice(&bvlb_indices);
+                mapped.slice_mut(dr.indices.start, bvlb_indices.len()).clone_from_slice(&bvlb_indices);
             }
-            *mapped.get_mut(hint_const_offset) = hint;
-            mapped.slice_mut(tf_offset, transforms.len()).clone_from_slice(&transforms);
+            *mapped.get_mut(hint_const_range.start) = hint;
+            mapped.slice_mut(transforms_range.start, transforms.len()).clone_from_slice(&transforms);
         }
         unsafe { umem.unmap(); }
         let init_commands = f.cmdpool.alloc(1, true).unwrap();
         init_commands[0].begin().unwrap()
             .pipeline_barrier(fe::PipelineStageFlags::TOP_OF_PIPE, fe::PipelineStageFlags::TRANSFER, true,
                 &[], &[
-                    fe::BufferMemoryBarrier::new(&buf, 0 .. bufsize, 0, fe::AccessFlags::TRANSFER.write),
-                    fe::BufferMemoryBarrier::new(&ubuf, 0 .. bufsize, 0, fe::AccessFlags::TRANSFER.read)
+                    fe::BufferMemoryBarrier::new(&buf, 0 .. prealloc.total, 0, fe::AccessFlags::TRANSFER.write),
+                    fe::BufferMemoryBarrier::new(&ubuf, 0 .. prealloc.total, 0, fe::AccessFlags::TRANSFER.read)
                 ], &[])
-            .copy_buffer(&ubuf, &buf, &[fe::vk::VkBufferCopy { srcOffset: 0, dstOffset: 0, size: bufsize as _ }])
+            .copy_buffer(&ubuf, &buf, &[fe::vk::VkBufferCopy { srcOffset: 0, dstOffset: 0, size: prealloc.total as _ }])
             .pipeline_barrier(fe::PipelineStageFlags::TRANSFER, fe::PipelineStageFlags::VERTEX_INPUT, true,
                 &[], &[
-                    fe::BufferMemoryBarrier::new(&buf, 0 .. bufsize, fe::AccessFlags::TRANSFER.write,
+                    fe::BufferMemoryBarrier::new(&buf, 0 .. prealloc.total, fe::AccessFlags::TRANSFER.write,
                         fe::AccessFlags::VERTEX_ATTRIBUTE_READ | fe::AccessFlags::INDEX_READ)
                 ], &[]);
         f.queue.submit(&[fe::SubmissionBatch
@@ -294,48 +312,49 @@ impl PathfinderRenderBuffers
         ], false)?;
         let descset = descpool.alloc(&[utb_desc_layout])?.remove(0);
         let transforms_view =
-            buf.create_view(fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT, tf_offset as _ .. (tf_offset + tf_size) as _)?;
+            buf.create_view(fe::vk::VK_FORMAT_R32G32B32A32_SFLOAT, transforms_range.start as _ .. transforms_range.end as _)?;
         f.device.update_descriptor_sets(&[
             fe::DescriptorSetWriteInfo(descset, 0, 0,
                 fe::DescriptorUpdateInfo::UniformTexelBuffer(vec![transforms_view.native_ptr()])),
-            fe::DescriptorSetWriteInfo(descset, 1, 0, fe::DescriptorUpdateInfo::UniformBuffer(
-                vec![(buf.native_ptr(), hint_const_offset .. hint_const_offset + size_of::<Hint>())]))
+            fe::DescriptorSetWriteInfo(descset, 1, 0,
+                fe::DescriptorUpdateInfo::UniformBuffer(vec![(buf.native_ptr(), hint_const_range)]))
         ], &[]);
 
         f.device.wait()?;
         return Ok(PathfinderRenderBuffers
         {
-            buf, mem, interior_indices_offset, interior_vertex_range_per_mesh, bvlb_vertex_range_per_mesh,
-            bvlb_data_offset, bvlb_pos_offset, bvlb_indices_offset, descpool, descset, transforms_view
+            buf, mem, interior_pos_range, interior_indices_range, interior_vertex_range_per_mesh,
+            bvlb_vertex_range_per_mesh, curve_render_data_ranges, descpool, descset, transforms_view
         })
     }
     fn populate_direct_render_commands_for(&self, rec: &mut fe::CmdRecord, size: &fe::Extent2D, res: &Resources)
-        -> fe::Result<()>
     {
         use std::mem::size_of;
 
         rec .bind_graphics_pipeline_pair(&res.gp_simple_fill, &res.pl)
             .push_graphics_constant(fe::ShaderStage::VERTEX, 0, &[size.0 as f32, size.1 as _])
-            .bind_vertex_buffers(0, &[(&self.buf, 0)])
             .bind_graphics_descriptor_sets(0, &[self.descset], &[]);
+        
+        // draw interior
+        rec.bind_vertex_buffers(0, &[(&self.buf, self.interior_pos_range.start)]);
         for (i, vcount) in self.interior_vertex_range_per_mesh.iter().enumerate().map(|(a, b)| (a as i32, b))
         {
-            rec.bind_index_buffer(&self.buf, self.interior_indices_offset + vcount.start * size_of::<u32>(), fe::IndexType::U32);
+            rec.bind_index_buffer(&self.buf, self.interior_indices_range.start + vcount.start * size_of::<u32>(), fe::IndexType::U32);
             rec.push_graphics_constant(fe::ShaderStage::VERTEX, PF_DIRECT_RENDER_GLYPH_INDEX_OFFSET, &i);
             rec.draw_indexed(vcount.len() as _, 1, 0, 0, 0);
         }
-        if !self.bvlb_vertex_range_per_mesh.is_empty()
+        // draw exterior curve(if provided)
+        if let Some(ref dr) = self.curve_render_data_ranges
         {
             rec.bind_graphics_pipeline(&res.gp_curve_fill)
-                .bind_vertex_buffers(0, &[(&self.buf, self.bvlb_pos_offset), (&self.buf, self.bvlb_data_offset)]);
+                .bind_vertex_buffers(0, &[(&self.buf, dr.pos.start), (&self.buf, dr.data.start)]);
             for (i, vcount) in self.bvlb_vertex_range_per_mesh.iter().enumerate().map(|(a, b)| (a as i32, b))
             {
-                rec.bind_index_buffer(&self.buf, self.bvlb_indices_offset + vcount.start * size_of::<u32>(), fe::IndexType::U32);
+                rec.bind_index_buffer(&self.buf, dr.indices.start + vcount.start * size_of::<u32>(), fe::IndexType::U32);
                 rec.push_graphics_constant(fe::ShaderStage::VERTEX, PF_DIRECT_RENDER_GLYPH_INDEX_OFFSET, &i);
                 rec.draw_indexed(vcount.len() as _, 1, 0, 0, 0);
             }
         }
-        return Ok(());
     }
 }
 impl EventDelegate for App
@@ -612,7 +631,7 @@ impl App
             {
                 let mut drr = drc.begin_inherit(Some((fb, &r.rp, 0)), None)?;
                 drr.set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()]);
-                r.pf_bufs.populate_direct_render_commands_for(&mut drr, fb.size(), &r)?;
+                r.pf_bufs.populate_direct_render_commands_for(&mut drr, fb.size(), &r);
             }
             let mut rec = c.begin()?;
             // rec.set_viewport(0, &[vp.clone()]).set_scissor(0, &[scis.clone()]);
