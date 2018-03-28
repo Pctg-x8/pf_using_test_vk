@@ -710,7 +710,7 @@ fn main() { std::process::exit(GUIApplication::run(App::new())); }
 fn compute_stem_darkening_amount(pixels_per_em: f32, pixels_per_unit: f32) -> [f32; 2]
 {
     const LIMIT_SIZE: f32 = 72.0;
-    let amounts: [f32; 2] = [0.0121 * 2.0f32.sqrt(), 0.0121 * 1.25 * 2.0f32.sqrt()];
+    let amounts: [f32; 2] = [(0.0121 * 2.0f32.sqrt()) * (2.0 / screen_multiplier()), (0.0121 * 1.25 * 2.0f32.sqrt()) * (2.0 / screen_multiplier())];
 
     if pixels_per_em <= LIMIT_SIZE
     {
@@ -744,6 +744,8 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
     return (72.0 * backing_scale_factor.0) as f32;
 }
 #[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 72.0 }
+
+#[cfg(not(target_os = "macos"))] fn screen_multiplier() -> f32 { 1.0 }
 
 #[cfg(target_os = "macos")] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
 {
