@@ -658,9 +658,9 @@ impl App
     }
     fn render(&self) -> fe::Result<()>
     {
-        let fr = self.ferrite.borrow(); let f = fr.as_ref().unwrap();
-        let rtvr = self.rendertargets.borrow(); let rtvs = rtvr.as_ref().unwrap();
-        let rcmdsr = self.rcmds.borrow(); let rcmds = rcmdsr.as_ref().unwrap();
+        let f = Ref::map(self.ferrite.borrow(), |f| f.as_ref().unwrap());
+        let rtvs = Ref::map(self.rendertargets.borrow(), |b| b.as_ref().unwrap());
+        let rcmds = Ref::map(self.rcmds.borrow(), |b| b.as_ref().unwrap());
 
         let next = rtvs.swapchain.acquire_next(None, fe::CompletionHandler::Device(&f.semaphore_sync_next))?
             as usize;
