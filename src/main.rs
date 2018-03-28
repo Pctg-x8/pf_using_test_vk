@@ -525,7 +525,8 @@ impl Resources
         for p in paths
         {
             let mut partitioner = Partitioner::new();
-            for pe in Transform2DPathIter::new(p.into_iter(), &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
+            for pe in Transform2DPathIter::new(p.into_iter(),
+                &Transform2D::create_translation(-left_offs * 0.5, -max_height * 0.5))
             {
                 partitioner.builder_mut().path_event(pe);
             }
