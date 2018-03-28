@@ -798,15 +798,16 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
 #[cfg(target_pointer_width = "64")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f64);
 #[cfg(target_os = "macos")]
 #[cfg(target_pointer_width = "32")] #[repr(C)] #[derive(Debug, Clone, Copy)] struct CGFloat(f32);
-#[cfg(target_os = "macos")] fn screen_dpi() -> f32
-{
-    let screen: *mut Object = unsafe { msg_send![Class::get("NSScreen").unwrap(), mainScreen] };
-    let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
-    return (72.0 * backing_scale_factor.0) as f32;
-}
+#[cfg(target_os = "macos")] fn screen_dpi() -> f32 { 72.0 * screen_multiplier() }
 #[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 72.0 }
 
 #[cfg(not(target_os = "macos"))] fn screen_multiplier() -> f32 { 1.0 }
+#[cfg(target_os = "macos")] fn screen_multiplier() -> f32
+{
+    let screen: *mut Object = unsafe { msg_send![Class::get("NSScreen").unwrap(), mainScreen] };
+    let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
+    return backing_scale_factor.0 as _;
+}
 
 #[cfg(target_os = "macos")] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
 {
