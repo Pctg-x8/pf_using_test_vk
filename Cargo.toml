@@ -25,6 +25,7 @@ objc = "0.2"
 core-graphics = "0.13"
 core-text = "9.2"
 foreign-types-shared = "0.1"
+appkit = { git = "https://github.com/Pctg-x8/appkit-rs" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser"] }

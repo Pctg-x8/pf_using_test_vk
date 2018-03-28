@@ -790,6 +790,7 @@ fn stem_darkening_amount(_font_size: f32, _pixels_per_unit: f32) -> [f32; 2] { [
 fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_darkening_amount(font_size, pixels_per_unit) }
 
 #[cfg(target_os = "macos")] #[macro_use] extern crate objc;
+#[cfg(target_os = "macos")] extern crate appkit;
 #[cfg(target_os = "macos")] extern crate core_graphics;
 #[cfg(target_os = "macos")] extern crate core_text;
 #[cfg(target_os = "macos")] extern crate foreign_types_shared;
@@ -802,12 +803,7 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
 #[cfg(not(target_os = "macos"))] fn screen_dpi() -> f32 { 72.0 }
 
 #[cfg(not(target_os = "macos"))] fn screen_multiplier() -> f32 { 1.0 }
-#[cfg(target_os = "macos")] fn screen_multiplier() -> f32
-{
-    let screen: *mut Object = unsafe { msg_send![Class::get("NSScreen").unwrap(), mainScreen] };
-    let backing_scale_factor: CGFloat = unsafe { msg_send![screen, backingScaleFactor] };
-    return backing_scale_factor.0 as _;
-}
+#[cfg(target_os = "macos")] fn screen_multiplier() -> f32 { appkit::NSScreen::main().backing_scale_factor() as _ }
 
 #[cfg(target_os = "macos")] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
 {
@@ -827,7 +823,7 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
 
     // システムフォント(San Francisco/Helvetica Neue)は日本語に対応していない
     // そのうちフォールバック機能をfont-rendererにつける必要がある
-    let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W3\0".as_ptr()] };
+    let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W4\0".as_ptr()] };
     let nsfont: *mut Object = unsafe { msg_send![Class::get("NSFont").unwrap(), fontWithName: fontname size: CGFloat(0.0)] };
     let _: () = unsafe { msg_send![fontname, release] };
     let point_size: CGFloat = unsafe { msg_send![nsfont, pointSize] };

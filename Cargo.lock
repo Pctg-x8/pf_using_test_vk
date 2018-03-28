@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "appkit"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appkit-rs#d865912ba2384737f2d9920a69399926a4049af8"
+source = "git+https://github.com/Pctg-x8/appkit-rs#40088fcc6c9e136c48d39e873f002ebd189bbc8b"
 dependencies = [
  "appkit-derive 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -45,7 +45,7 @@ dependencies = [
 [[package]]
 name = "appkit-derive"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appkit-rs#d865912ba2384737f2d9920a69399926a4049af8"
+source = "git+https://github.com/Pctg-x8/appkit-rs#40088fcc6c9e136c48d39e873f002ebd189bbc8b"
 dependencies = [
  "quote 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "syn 0.12.14 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -259,6 +259,7 @@ version = "0.1.0"
 dependencies = [
  "app_units 0.6.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "appframe 0.1.0 (git+https://github.com/Pctg-x8/appframe)",
+ "appkit 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
  "core-graphics 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "core-text 9.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "euclid 0.17.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -393,7 +394,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_partitioner"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/pathfinder#777f8e9a73e376547c47ff6eed38ed9779339f23"
+source = "git+https://github.com/Pctg-x8/pathfinder#62400bc74e0168adcaa51d5bcae58728aefef9c7"
 dependencies = [
  "arrayvec 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "bincode 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -413,7 +414,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_path_utils"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/pathfinder#777f8e9a73e376547c47ff6eed38ed9779339f23"
+source = "git+https://github.com/Pctg-x8/pathfinder#62400bc74e0168adcaa51d5bcae58728aefef9c7"
 dependencies = [
  "arrayvec 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "euclid 0.17.2 (registry+https://github.com/rust-lang/crates.io-index)",
