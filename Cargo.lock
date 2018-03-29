@@ -18,7 +18,7 @@ dependencies = [
 [[package]]
 name = "appframe"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appframe#f2847dc308297d379515dac1ff9b49855436249c"
+source = "git+https://github.com/Pctg-x8/appframe#b73b1d795e853335421a86b8baa46be393768e91"
 dependencies = [
  "appkit 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
  "appkit-derive 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
