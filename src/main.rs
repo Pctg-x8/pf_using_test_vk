@@ -405,7 +405,9 @@ impl WindowEventDelegate for MainWindow {
         *self.surface.borrow_mut() = Some(s); *self.res.borrow_mut() = Some(sr);
         *self.wrt.borrow_mut() = Some(wrt); *self.commands.borrow_mut() = Some(cmds);
     }
-    fn resize(&self, _width: u32, _height: u32) {
+    fn resize(&self, _width: u32, _height: u32, is_in_live_resize: bool) {
+        if is_in_live_resize { return; }
+        
         *self.commands.borrow_mut() = None; *self.wrt.borrow_mut() = None;
         let surface = Ref::map(self.surface.borrow(), |s| s.as_ref().unwrap());
         let sr = Ref::map(self.res.borrow(), |s| s.as_ref().unwrap());
