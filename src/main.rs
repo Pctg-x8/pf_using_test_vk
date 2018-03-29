@@ -549,7 +549,7 @@ impl Resources
         let pixels_per_unit = fc.pixels_per_unit(&font).unwrap();
         let mut stem_darkening_offset = embolden_amount(font.size.to_f32_px(), pixels_per_unit);
         let ascent = fc.ascent(&font).unwrap() as f32;
-        let sd_yscale = (ascent + stem_darkening_offset[1]) / ascent;
+        let sd_yscale = (ascent + stem_darkening_offset[1]) / (ascent * screen_multiplier());
         stem_darkening_offset[0] *= pixels_per_unit / 2.0f32.sqrt();
         stem_darkening_offset[1] *= sd_yscale * pixels_per_unit / 2.0f32.sqrt();
         // println!("stem darkening offset: {:?}", stem_darkening_offset);
@@ -827,7 +827,7 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
     // そのうちフォールバック機能をfont-rendererにつける必要がある
     let nsfont = appkit::NSFont::with_name("ヒラギノ角ゴシック W4", 0.0).unwrap();
     let point_size = nsfont.point_size();
-    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont.leave_id(), null_mut()) as *mut _) };
+    let cgfont = unsafe { CGFont::from_ptr(CTFontCopyGraphicsFont(nsfont as *const _ as _, null_mut()) as *mut _) };
     /*let fontname: *mut Object = unsafe { msg_send![Class::get("NSString").unwrap(), stringWithUTF8String: "ヒラギノ角ゴシック W4\0".as_ptr()] };
     let nsfont: *mut Object = unsafe { msg_send![Class::get("NSFont").unwrap(), fontWithName: fontname size: CGFloat(0.0)] };
     let _: () = unsafe { msg_send![fontname, release] };
@@ -842,7 +842,7 @@ fn embolden_amount(font_size: f32, pixels_per_unit: f32) -> [f32; 2] { stem_dark
         println!("* {}", unsafe { std::ffi::CStr::from_ptr(cstr.as_ptr()).to_str().unwrap() });
     }*/
     fc.add_native_font(&key, cgfont).unwrap();
-    return FontInstance::new(&key, Au::from_f32_px(point_size.0 as f32 * screen_dpi() / 72.0));
+    return FontInstance::new(&key, Au::from_f32_px(point_size as f32 * screen_dpi() / 72.0));
 }
 #[cfg(windows)] extern crate winapi;
 #[cfg(windows)] fn system_message_font_instance(fc: &mut FontContext<usize>, key: usize) -> FontInstance<usize>
