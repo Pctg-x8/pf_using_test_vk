@@ -408,15 +408,15 @@ impl WindowEventDelegate for MainWindow {
     fn resize(&self, _width: u32, _height: u32, is_in_live_resize: bool) {
         if is_in_live_resize { return; }
         
-        *self.commands.borrow_mut() = None; *self.wrt.borrow_mut() = None;
+        drop(self.commands.borrow_mut().take());
+        drop(self.wrt.borrow_mut().take());
         let surface = Ref::map(self.surface.borrow(), |s| s.as_ref().unwrap());
         let sr = Ref::map(self.res.borrow(), |s| s.as_ref().unwrap());
-        let wrt = WindowRenderTargets::new(&self.ferrite, &sr, &surface).unwrap();
-        let wrt = if let Some(r) = wrt { r } else { return; };
-        let res = Ref::map(self.res.borrow(), |r| r.as_ref().unwrap());
-        *self.commands.borrow_mut() = Some(RenderCommands::populate(&self.ferrite, &self.common_res, &wrt, &res).unwrap());
-        *self.wrt.borrow_mut() = Some(wrt);
-        if let Some(ref w) = *self.window.borrow() { w.mark_dirty(); }
+        if let Some(r) = WindowRenderTargets::new(&self.ferrite, &sr, &surface).unwrap() {
+            *self.commands.borrow_mut() = Some(RenderCommands::populate(&self.ferrite, &self.common_res, &r, &sr).unwrap());
+            *self.wrt.borrow_mut() = Some(r);
+            if let Some(ref w) = *self.window.borrow() { w.mark_dirty(); }
+        }
     }
     fn render(&self) {
         if self.wrt.borrow().is_none() {
@@ -425,19 +425,19 @@ impl WindowEventDelegate for MainWindow {
             let wrt = WindowRenderTargets::new(&self.ferrite, &sr, &surface).unwrap();
             if let Some(r) = wrt { *self.wrt.borrow_mut() = Some(r); } else { return; }
         }
-        if self.commands.borrow().is_none() {
+        self.commands.borrow_mut().get_or_insert_with(|| {
             let wrt = Ref::map(self.wrt.borrow(), |a| a.as_ref().unwrap());
             let res = Ref::map(self.res.borrow(), |r| r.as_ref().unwrap());
-            *self.commands.borrow_mut() =
-                Some(RenderCommands::populate(&self.ferrite, &self.common_res, &wrt, &res).unwrap());
-        }
+            return RenderCommands::populate(&self.ferrite, &self.common_res, &wrt, &res).unwrap();
+        });
         
         match self.commit_frame() {
             Err(fe::VkResultBox(fe::vk::VK_ERROR_OUT_OF_DATE_KHR)) => {
                 // Require to recreate resources(discarding resources)
                 self.ferrite.fence_command_completion.wait().unwrap();
                 self.ferrite.fence_command_completion.reset().unwrap();
-                *self.commands.borrow_mut() = None; *self.wrt.borrow_mut() = None;
+                drop(self.commands.borrow_mut().take());
+                drop(self.wrt.borrow_mut().take());
 
                 // reissue rendering
                 self.render();
