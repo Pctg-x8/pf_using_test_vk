@@ -18,7 +18,7 @@ dependencies = [
 [[package]]
 name = "appframe"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appframe#4047b806c651cdb005920c3025a07885544ef7cf"
+source = "git+https://github.com/Pctg-x8/appframe#3213fd18e8a9abf33856a9c344fef194022fb968"
 dependencies = [
  "appkit 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
  "appkit-derive 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "appkit"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appkit-rs#40088fcc6c9e136c48d39e873f002ebd189bbc8b"
+source = "git+https://github.com/Pctg-x8/appkit-rs#0df5850073bc73a8d656da3d915429e49125d5eb"
 dependencies = [
  "appkit-derive 0.1.0 (git+https://github.com/Pctg-x8/appkit-rs)",
  "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -45,10 +45,10 @@ dependencies = [
 [[package]]
 name = "appkit-derive"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/appkit-rs#40088fcc6c9e136c48d39e873f002ebd189bbc8b"
+source = "git+https://github.com/Pctg-x8/appkit-rs#0df5850073bc73a8d656da3d915429e49125d5eb"
 dependencies = [
  "quote 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "syn 0.12.14 (registry+https://github.com/rust-lang/crates.io-index)",
+ "syn 0.12.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -174,7 +174,7 @@ dependencies = [
 [[package]]
 name = "ferrite"
 version = "1.1.70"
-source = "git+https://github.com/Pctg-x8/ferrite#e8f3cab68ff1febf911688136f4c19b7c0996ec1"
+source = "git+https://github.com/Pctg-x8/ferrite#6d7f12664c91d1e66a6d82ef94b9c8691afc443a"
 dependencies = [
  "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -394,7 +394,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_partitioner"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/pathfinder#62400bc74e0168adcaa51d5bcae58728aefef9c7"
+source = "git+https://github.com/Pctg-x8/pathfinder#8774267a1c18fc295427197719c34cc2f8aedd1a"
 dependencies = [
  "arrayvec 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "bincode 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -414,7 +414,7 @@ dependencies = [
 [[package]]
 name = "pathfinder_path_utils"
 version = "0.1.0"
-source = "git+https://github.com/Pctg-x8/pathfinder#62400bc74e0168adcaa51d5bcae58728aefef9c7"
+source = "git+https://github.com/Pctg-x8/pathfinder#8774267a1c18fc295427197719c34cc2f8aedd1a"
 dependencies = [
  "arrayvec 0.4.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "euclid 0.17.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -486,7 +486,7 @@ dependencies = [
  "proc-macro2 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "quote 0.4.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive_internals 0.22.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "syn 0.12.14 (registry+https://github.com/rust-lang/crates.io-index)",
+ "syn 0.12.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -495,7 +495,7 @@ version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "proc-macro2 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "syn 0.12.14 (registry+https://github.com/rust-lang/crates.io-index)",
+ "syn 0.12.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "0.12.14"
+version = "0.12.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 dependencies = [
  "proc-macro2 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -689,7 +689,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum serde_derive_internals 0.22.2 (registry+https://github.com/rust-lang/crates.io-index)" = "d2f04ed291686ce195a5c8f554aaf36e50a721fbf829ee3b6151e6f85eccf945"
 "checksum sid 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)" = "bf1345fb57b3bee666f25d45f85ba3a97f11b8cede5abe0d1212ba0324082faf"
 "checksum syn 0.11.11 (registry+https://github.com/rust-lang/crates.io-index)" = "d3b891b9015c88c576343b9b3e41c2c11a51c219ef067b264bd9c8aa9b441dad"
-"checksum syn 0.12.14 (registry+https://github.com/rust-lang/crates.io-index)" = "8c5bc2d6ff27891209efa5f63e9de78648d7801f085e4653701a692ce938d6fd"
+"checksum syn 0.12.15 (registry+https://github.com/rust-lang/crates.io-index)" = "c97c05b8ebc34ddd6b967994d5c6e9852fa92f8b82b3858c39451f97346dcce5"
 "checksum synom 0.11.3 (registry+https://github.com/rust-lang/crates.io-index)" = "a393066ed9010ebaed60b9eafa373d4b1baac186dd7e008555b0f702b51945b6"
 "checksum thread_local 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)" = "279ef31c19ededf577bfd12dfae728040a21f635b06a24cd670ff510edd38963"
 "checksum ucd-util 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "fd2be2d6639d0f8fe6cdda291ad456e23629558d466e2789d2c3e9892bda285d"
